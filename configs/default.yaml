@@ -1,0 +1,45 @@
+# Screen capture settings
+capture:
+  monitor: 0            # Monitor index
+  region: null          # [left, top, width, height] or null for full screen
+  fps: 30               # Target capture FPS
+
+# Preprocessing
+preprocessing:
+  resize: [84, 84]      # Standard RL observation size
+  grayscale: true
+  frame_stack: 4         # Number of stacked frames for temporal info
+
+# Action space — update these based on actual game controls
+actions:
+  - name: "aim_left"
+    key: "left"
+  - name: "aim_right"
+    key: "right"
+  - name: "power_up"
+    key: "up"
+  - name: "power_down"
+    key: "down"
+  - name: "shoot"
+    key: "space"
+
+# Reward detection — pixel regions to monitor for score/state changes
+# These need to be calibrated by running scripts/test_capture.py
+reward:
+  score_region: null     # [left, top, right, bottom] for score area
+  method: "pixel_diff"   # "pixel_diff", "ocr", or "template"
+
+# Training hyperparameters
+training:
+  algorithm: "PPO"
+  total_timesteps: 1_000_000
+  learning_rate: 0.0003
+  batch_size: 64
+  n_steps: 2048
+  gamma: 0.99
+  tensorboard_log: "./runs"
+
+# Episode settings
+episode:
+  max_steps: 2000        # Max steps before forced reset
+  step_delay: 0.033      # Seconds between actions (~30 actions/sec)
