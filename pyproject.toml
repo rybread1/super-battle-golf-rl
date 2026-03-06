@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "pyyaml",
     "tensorboard",
+    "pywin32>=311",
 ]
 
 [project.scripts]

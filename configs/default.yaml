@@ -1,7 +1,13 @@
-# Screen capture settings
+# Game window settings
+window:
+  x: 0
+  y: 0
+  width: 1280
+  height: 720
+  auto_launch: true     # Launch the game via Steam on env.reset()
+
+# Screen capture settings — region is auto-set from window client area
 capture:
-  monitor: 0            # Monitor index
-  region: null          # [left, top, width, height] or null for full screen
   fps: 30               # Target capture FPS
 
 # Preprocessing

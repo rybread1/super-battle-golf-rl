@@ -16,6 +16,7 @@ checkpoints/
 # Captured frames
 *.png
 *.jpg
+screenshots/
 
 # Misc
 .uv/
