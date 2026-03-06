@@ -1,8 +1,8 @@
-"""Test the full menu navigation sequence.
+"""Launch Super Battle Golf and navigate to a match.
 
-Usage: uv run python scripts/test_navigate.py --no-launch
-
-Make sure the game is at the main menu before running.
+Usage:
+    uv run python scripts/start_game.py             # Launch game and navigate
+    uv run python scripts/start_game.py --no-launch  # Game already running
 """
 
 import argparse
@@ -18,8 +18,8 @@ from sbg.navigate import navigate_to_match
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--no-launch", action="store_true")
+    parser = argparse.ArgumentParser(description="Launch and start a Super Battle Golf match")
+    parser.add_argument("--no-launch", action="store_true", help="Skip launching — game must already be running")
     args = parser.parse_args()
 
     hwnd, region = setup_game_window(launch=not args.no_launch)
@@ -34,16 +34,8 @@ def main():
 
     navigate_to_match(hwnd, region, cap)
 
-    # Take a screenshot of the result
-    time.sleep(2)
-    frame = cap.grab()
-    if frame is not None:
-        import cv2
-        os.makedirs("screenshots", exist_ok=True)
-        cv2.imwrite("screenshots/match_started.png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        print("Saved screenshots/match_started.png")
-
     cap.stop()
+    print(f"\nGame is ready. Window handle: {hwnd}, capture region: {region}")
 
 
 if __name__ == "__main__":
