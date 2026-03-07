@@ -1,121 +1,229 @@
-"""Gymnasium environment wrapping screen capture + input simulation."""
+"""Frame-level Gymnasium environment for Super Battle Golf.
+
+The agent controls both navigation (walking to the ball) and shot
+execution (aim, angle, power) through a unified action space.
+
+Each env.step() is one atomic action — either a movement or a shot attempt.
+"""
 
 import time
 
 import cv2
 import gymnasium as gym
 import numpy as np
-import yaml
 from gymnasium import spaces
 
-from sbg.actions import ActionSpace
+from sbg.actions import (
+    walk_forward, walk_forward_turn_left, walk_forward_turn_right,
+    enter_stance, aim, set_angle, charge_and_shoot,
+)
 from sbg.capture import ScreenCapture
-from sbg.reward import RewardDetector
+from sbg.detect import is_in_stance, is_loading_screen, get_player_progress
+from sbg.navigate import navigate_to_match, wait_for_next_hole
+from sbg.reward import (
+    compute_step_reward,
+    compute_failed_shot_reward,
+    compute_shot_reward,
+)
+from sbg.window import setup_game_window
+
+# Move types
+MOVE_FORWARD = 0
+MOVE_FORWARD_LEFT = 1
+MOVE_FORWARD_RIGHT = 2
+ATTEMPT_SHOT = 3
 
 
 class SuperBattleGolfEnv(gym.Env):
-    """Custom Gymnasium env for Super Battle Golf via screen capture.
+    """Frame-level RL environment for Super Battle Golf.
 
-    Observations: Stacked grayscale frames (frame_stack, H, W)
-    Actions: Discrete game inputs (aim, power, shoot)
+    Observation: 84x84x3 RGB game frame.
+    Action: MultiDiscrete([4, 16, 4, 10])
+        - move_type: 0=forward, 1=forward+turn left, 2=forward+turn right, 3=attempt shot
+        - aim_direction: 0-15 (8=straight) — only used when move_type=3
+        - shot_angle: 0-3 — only used when move_type=3
+        - power_level: 0-9 — only used when move_type=3
+
+    One step = one atomic action. Navigation steps are fast (~0.5s).
+    Shot steps are slow (~3-10s for animation).
     """
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, config_path: str = "configs/default.yaml"):
+    def __init__(
+        self,
+        obs_size: tuple[int, int] = (84, 84),
+        max_steps_per_hole: int = 500,
+        max_holes: int = 4,
+        auto_launch: bool = True,
+    ):
         super().__init__()
 
-        with open(config_path) as f:
-            self.config = yaml.safe_load(f)
+        self.obs_size = obs_size
+        self.max_steps_per_hole = max_steps_per_hole
+        self.max_holes = max_holes
+        self.auto_launch = auto_launch
 
-        cap_cfg = self.config["capture"]
-        prep_cfg = self.config["preprocessing"]
-        reward_cfg = self.config["reward"]
+        # Action space: move_type (4), aim (16), angle (4), power (10)
+        self.action_space = spaces.MultiDiscrete([4, 16, 4, 10])
 
-        # Screen capture
-        self.capture = ScreenCapture(
-            monitor=cap_cfg["monitor"],
-            region=cap_cfg.get("region"),
-            fps=cap_cfg["fps"],
-        )
-
-        # Actions
-        self.action_handler = ActionSpace(self.config["actions"])
-        self.action_space = spaces.Discrete(self.action_handler.n)
-
-        # Preprocessing
-        self.img_size = tuple(prep_cfg["resize"])
-        self.grayscale = prep_cfg["grayscale"]
-        self.frame_stack_size = prep_cfg["frame_stack"]
-
-        # Observation space: stacked frames
+        # Observation: RGB frame resized
         self.observation_space = spaces.Box(
-            low=0,
-            high=255,
-            shape=(self.frame_stack_size, *self.img_size),
+            low=0, high=255,
+            shape=(obs_size[0], obs_size[1], 3),
             dtype=np.uint8,
         )
 
-        # Reward
-        self.reward_detector = RewardDetector(
-            method=reward_cfg["method"],
-            score_region=reward_cfg.get("score_region"),
-        )
+        # State
+        self.hwnd = None
+        self.region = None
+        self.capture = None
+        self.prev_progress = None
+        self.hole_steps = 0
+        self.hole_strokes = 0
+        self.holes_played = 0
+        self._initialized = False
 
-        # Episode tracking
-        ep_cfg = self.config["episode"]
-        self.max_steps = ep_cfg["max_steps"]
-        self.step_delay = ep_cfg["step_delay"]
-        self.current_step = 0
-        self.frame_stack = None
-
-    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        """Convert raw frame to model input: resize + grayscale."""
-        if self.grayscale:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        frame = cv2.resize(frame, self.img_size)
-        return frame
+    def _get_frame(self) -> np.ndarray | None:
+        return self.capture.grab()
 
     def _get_obs(self) -> np.ndarray:
-        """Capture frame, preprocess, and return stacked observation."""
-        raw = self.capture.grab()
-        processed = self._preprocess(raw)
+        frame = self._get_frame()
+        if frame is None:
+            return np.zeros((*self.obs_size, 3), dtype=np.uint8)
+        return cv2.resize(frame, self.obs_size)
 
-        self.frame_stack = np.roll(self.frame_stack, shift=-1, axis=0)
-        self.frame_stack[-1] = processed
-
-        return self.frame_stack.copy()
+    def _wait_for_ball_to_land(self, timeout: float = 10.0):
+        """Wait for the ball to land after a shot."""
+        time.sleep(2.0)
+        start = time.time()
+        stable_frames = 0
+        while time.time() - start < timeout:
+            frame = self._get_frame()
+            if frame is not None and not is_loading_screen(frame):
+                stable_frames += 1
+                if stable_frames >= 3:
+                    return
+            else:
+                stable_frames = 0
+            time.sleep(0.3)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        if self.frame_stack is None:
+        if not self._initialized:
+            self.hwnd, self.region = setup_game_window(launch=self.auto_launch)
+            self.capture = ScreenCapture(region=self.region, fps=30)
             self.capture.start()
+            time.sleep(1)
 
-        self.current_step = 0
-        self.reward_detector.reset()
+            print("Navigating to match...")
+            time.sleep(3)
+            navigate_to_match(self.hwnd, self.region, self.capture)
+            self._initialized = True
+        else:
+            if self.holes_played >= self.max_holes:
+                print("Match complete — need to start new match")
+                self.holes_played = 0
 
-        # Initialize frame stack with current screen
-        raw = self.capture.grab()
-        processed = self._preprocess(raw)
-        self.frame_stack = np.stack([processed] * self.frame_stack_size)
-
-        return self.frame_stack.copy(), {}
-
-    def step(self, action: int):
-        self.action_handler.act(action)
-        time.sleep(self.step_delay)
+        time.sleep(1)
+        frame = self._get_frame()
+        self.prev_progress = get_player_progress(frame) if frame is not None else None
+        self.hole_steps = 0
+        self.hole_strokes = 0
 
         obs = self._get_obs()
-        raw_frame = self.capture.grab()
+        return obs, {"holes_played": self.holes_played}
 
-        reward = self.reward_detector.compute(raw_frame)
-        terminated = self.reward_detector.detect_episode_end(raw_frame)
+    def step(self, action):
+        move_type, aim_dir, angle_idx, power_level = action
+        self.hole_steps += 1
 
-        self.current_step += 1
-        truncated = self.current_step >= self.max_steps
+        if move_type == MOVE_FORWARD:
+            walk_forward()
+            reward = compute_step_reward()
+            obs = self._get_obs()
+            truncated = self.hole_steps >= self.max_steps_per_hole
+            return obs, reward, False, truncated, self._info()
 
-        return obs, reward, terminated, truncated, {}
+        elif move_type == MOVE_FORWARD_LEFT:
+            walk_forward_turn_left()
+            reward = compute_step_reward()
+            obs = self._get_obs()
+            truncated = self.hole_steps >= self.max_steps_per_hole
+            return obs, reward, False, truncated, self._info()
+
+        elif move_type == MOVE_FORWARD_RIGHT:
+            walk_forward_turn_right()
+            reward = compute_step_reward()
+            obs = self._get_obs()
+            truncated = self.hole_steps >= self.max_steps_per_hole
+            return obs, reward, False, truncated, self._info()
+
+        else:  # ATTEMPT_SHOT
+            return self._do_shot(int(aim_dir), int(angle_idx), int(power_level))
+
+    def _do_shot(self, aim_dir: int, angle_idx: int, power_level: int):
+        """Attempt to enter stance and take a shot."""
+        # Try entering stance
+        enter_stance()
+        time.sleep(0.3)
+
+        frame = self._get_frame()
+        if frame is None or not is_in_stance(frame):
+            # Failed — not close enough to ball
+            reward = compute_failed_shot_reward()
+            obs = self._get_obs()
+            truncated = self.hole_steps >= self.max_steps_per_hole
+            return obs, reward, False, truncated, self._info(shot_failed=True)
+
+        # In stance — read progress bar NOW (after walking to ball).
+        # This reflects where the previous shot landed: if the last shot
+        # moved the ball closer to the hole, we walked less and progress
+        # is higher than prev_progress.
+        current_progress = get_player_progress(frame)
+
+        # Execute the shot
+        aim(aim_dir)
+        set_angle(angle_idx)
+        time.sleep(0.2)
+        charge_and_shoot(power_level)
+        self.hole_strokes += 1
+
+        # Wait for ball to land
+        self._wait_for_ball_to_land()
+
+        # Check if hole is complete
+        frame = self._get_frame()
+        hole_complete = frame is not None and is_loading_screen(frame)
+
+        # Reward based on progress delta (prev shot position → current position)
+        reward = compute_shot_reward(self.prev_progress, current_progress, hole_complete)
+        self.prev_progress = current_progress
+
+        terminated = hole_complete
+        truncated = self.hole_steps >= self.max_steps_per_hole
+
+        if terminated:
+            self.holes_played += 1
+            if self.holes_played < self.max_holes:
+                wait_for_next_hole(self.capture)
+
+        obs = self._get_obs()
+        return obs, reward, terminated, truncated, self._info(
+            hole_complete=hole_complete,
+        )
+
+    def _info(self, hole_complete=False, shot_failed=False) -> dict:
+        return {
+            "hole_steps": self.hole_steps,
+            "hole_strokes": self.hole_strokes,
+            "holes_played": self.holes_played,
+            "hole_complete": hole_complete,
+            "shot_failed": shot_failed,
+            "progress": self.prev_progress,
+        }
 
     def close(self):
-        self.capture.stop()
+        if self.capture:
+            self.capture.stop()

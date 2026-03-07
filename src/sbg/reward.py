@@ -1,61 +1,54 @@
-"""Reward detection from screen state."""
+"""Reward computation for frame-level RL.
 
-import numpy as np
+Rewards are given per-step for navigation efficiency,
+per-shot for reaching the ball and making progress toward the pin.
+"""
+
+# Navigation
+STEP_PENALTY = -0.01         # small cost per navigation step
+FAILED_SHOT_PENALTY = -0.05  # tried to shoot but wasn't near ball
+
+# Shot
+SUCCESSFUL_SHOT_BONUS = 1.0  # reached the ball and took a swing
+PROGRESS_SCALE = 5.0         # multiplier on progress bar delta
+
+# Hole completion
+HOLE_BONUS = 10.0
 
 
-class RewardDetector:
-    """Detects reward signals by comparing consecutive frames.
+def compute_step_reward() -> float:
+    """Reward for a single navigation step (forward/turn)."""
+    return STEP_PENALTY
 
-    This is a starting point — you'll need to calibrate regions and methods
-    based on the actual game UI. Run scripts/test_capture.py to identify
-    where score, health, and game-state info appears on screen.
+
+def compute_failed_shot_reward() -> float:
+    """Reward when agent tries to shoot but can't enter stance."""
+    return FAILED_SHOT_PENALTY
+
+
+def compute_shot_reward(
+    prev_progress: float | None,
+    new_progress: float | None,
+    hole_complete: bool = False,
+) -> float:
+    """Compute reward for a successful shot.
+
+    prev_progress/new_progress come from the progress bar (character
+    distance to pin). Progress is read right before each shot, so the
+    delta reflects how much closer the previous shot moved the ball.
+
+    Args:
+        prev_progress: Progress bar reading before previous shot (0.0-1.0).
+        new_progress: Progress bar reading before this shot.
+        hole_complete: Whether the ball went in the hole.
     """
+    reward = SUCCESSFUL_SHOT_BONUS
 
-    def __init__(self, method: str = "pixel_diff", score_region: tuple | None = None):
-        self.method = method
-        self.score_region = score_region
-        self._prev_frame = None
+    if prev_progress is not None and new_progress is not None:
+        delta = new_progress - prev_progress
+        reward += delta * PROGRESS_SCALE
 
-    def compute(self, frame: np.ndarray) -> float:
-        """Compute reward from current frame."""
-        if self.method == "pixel_diff":
-            return self._pixel_diff_reward(frame)
-        return 0.0
+    if hole_complete:
+        reward += HOLE_BONUS
 
-    def _pixel_diff_reward(self, frame: np.ndarray) -> float:
-        """Basic reward: measure change in score region between frames.
-
-        This is a placeholder. Replace with game-specific logic once you
-        understand the screen layout (OCR for score, template matching
-        for game events, etc.)
-        """
-        if self._prev_frame is None:
-            self._prev_frame = frame
-            return 0.0
-
-        if self.score_region:
-            l, t, r, b = self.score_region
-            curr = frame[t:b, l:r]
-            prev = self._prev_frame[t:b, l:r]
-        else:
-            curr = frame
-            prev = self._prev_frame
-
-        diff = np.mean(np.abs(curr.astype(float) - prev.astype(float)))
-        self._prev_frame = frame
-
-        # Normalize to small reward signal
-        return diff / 255.0
-
-    def detect_episode_end(self, frame: np.ndarray) -> bool:
-        """Detect if the episode (hole/round) has ended.
-
-        TODO: Implement based on game-specific signals like:
-        - Score screen appearing
-        - Specific pixel patterns at known locations
-        - Template matching for "hole complete" UI elements
-        """
-        return False
-
-    def reset(self):
-        self._prev_frame = None
+    return reward
