@@ -5,6 +5,7 @@ Regions are relative to actual frame dimensions — we normalize coordinates
 as fractions of frame size to handle slight resolution differences.
 """
 
+import pathlib
 import re
 
 import cv2
@@ -28,48 +29,89 @@ def _crop_frac(frame: np.ndarray, left: float, top: float, right: float, bottom:
     return frame[int(top * h):int(bottom * h), int(left * w):int(right * w)]
 
 
+# UI icon templates for state detection (grayscale, inner-only crops with no
+# background pixels so matching is invariant to what's behind the icon)
+_TMPL_DIR = pathlib.Path(__file__).parent / "templates"
+_mouse_icon_tmpl = cv2.imread(str(_TMPL_DIR / "mouse_arrow.png"), cv2.IMREAD_GRAYSCALE)
+_f_key_icon_tmpl = cv2.imread(str(_TMPL_DIR / "f_key_inner.png"), cv2.IMREAD_GRAYSCALE)
+_near_ball_icon_tmpl = cv2.imread(str(_TMPL_DIR / "near_ball_inner.png"), cv2.IMREAD_GRAYSCALE)
+
+# Threshold for template matching (TM_CCOEFF_NORMED)
+_ICON_MATCH_THRESH = 0.9
+
+
+def _match_ui_icon(frame_gray: np.ndarray, template: np.ndarray,
+                   region: tuple[float, float, float, float]) -> float:
+    """Match a grayscale template in a fractional region, return max score."""
+    h, w = frame_gray.shape[:2]
+    l, t, r, b = region
+    crop = frame_gray[int(t * h):int(b * h), int(l * w):int(r * w)]
+    if crop.shape[0] < template.shape[0] or crop.shape[1] < template.shape[1]:
+        return 0.0
+    result = cv2.matchTemplate(crop, template, cv2.TM_CCOEFF_NORMED)
+    return float(np.max(result))
+
+
 def detect_player_state(frame: np.ndarray) -> str:
-    """Detect the player's current state from bottom-left text and UI elements.
+    """Detect the player's current state from bottom-left UI icons.
+
+    Uses template matching for the mouse button icon (in stance) and
+    F key icon (swinging). Much more reliable than white-pixel counting.
 
     Returns one of:
-        'none'          — not near ball, not in stance
-        'near_ball'     — standing near ball, not in stance ("Swing Stance [HOLD]")
-        'stance_no_hit' — in stance but too far to hit (faint power bar, no angle selector)
-        'stance_can_hit'— in stance and close enough to hit (solid power bar + angle selector)
-        'swinging'      — actively swinging (power bar filling, "Cancel" text visible)
+        'none'          — no stance UI visible
+        'near_ball'     — near ball, "Swing Stance [HOLD]" prompt visible
+        'stance_no_hit' — in stance but too far to hit (faint power bar)
+        'stance_can_hit'— in stance and close enough to hit (solid power bar)
+        'swinging'      — actively swinging (F Cancel visible above stance icons)
     """
-    h, w = frame.shape[:2]
+    # Convert to grayscale for template matching (background-invariant)
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    _bl_region = (0.0, 0.85, 0.15, 1.0)
 
-    # Bottom-left text region — "Adjust Angle" or "Swing Stance [HOLD]"
-    text_crop = _crop_frac(frame, 0.04, 0.93, 0.30, 0.99)
-    text_gray = cv2.cvtColor(text_crop, cv2.COLOR_RGB2GRAY)
-    text_white = int(np.sum(text_gray > 200))
-
-    if text_white < 100:
+    # Check for stance mouse button icon (two split buttons with down-arrow)
+    mouse_score = _match_ui_icon(frame_gray, _mouse_icon_tmpl, _bl_region)
+    if mouse_score < _ICON_MATCH_THRESH:
+        # No stance icon — check for near_ball icon (single mouse, "Swing Stance [HOLD]")
+        near_score = _match_ui_icon(frame_gray, _near_ball_icon_tmpl, _bl_region)
+        if near_score >= _ICON_MATCH_THRESH:
+            return "near_ball"
         return "none"
 
-    # Measure text width to distinguish "Swing Stance [HOLD]" (wide) from "Adjust Angle" (narrow)
-    cols = np.where(np.any(text_gray > 200, axis=0))[0]
-    text_width = int(cols[-1] - cols[0]) if len(cols) > 1 else 0
-
-    if text_width > 180:
-        return "near_ball"
-
-    # We have "Adjust Angle" — check for "Cancel" text above it (visible when swinging)
-    cancel_crop = _crop_frac(frame, 0.02, 0.89, 0.15, 0.93)
-    cancel_gray = cv2.cvtColor(cancel_crop, cv2.COLOR_RGB2GRAY)
-    cancel_white = int(np.sum(cancel_gray > 200))
-
-    if cancel_white > 200:
+    # Stance mouse icon found — check for F key icon above it (swinging)
+    f_score = _match_ui_icon(frame_gray, _f_key_icon_tmpl,
+                             (0.0, 0.82, 0.15, 0.95))
+    if f_score >= _ICON_MATCH_THRESH:
         return "swinging"
 
-    # Check power bar opacity to distinguish "can hit" (solid bar, low std)
-    # from "can't hit" (faint/transparent bar blending with background, high std)
-    bar_crop = _crop_frac(frame, 0.075, 0.35, 0.095, 0.80)
-    bar_gray = cv2.cvtColor(bar_crop, cv2.COLOR_RGB2GRAY)
-    bar_std = float(np.std(bar_gray))
+    # In stance — check power bar to distinguish can_hit vs no_hit.
+    # Compare two vertical strips flanking the bar's left edge in HSV.
+    # A solid bar brightens (V up) and desaturates (S down), so
+    # avg(v_diff - s_diff) is high for can_hit, low for no_hit.
+    h, w = frame.shape[:2]
+    ax1, ax2 = int(0.244 * w), int(0.258 * w)
+    bx1, bx2 = int(0.258 * w), int(0.272 * w)
+    y_top, y_bot = int(0.48 * h), int(0.84 * h)
+    NUM_CHUNKS = 12
+    chunk_h = (y_bot - y_top) // NUM_CHUNKS
 
-    if bar_std < 30:
+    strip_rgb = frame[y_top:y_bot, ax1:bx2]
+    strip_hsv = cv2.cvtColor(strip_rgb, cv2.COLOR_RGB2HSV).astype(float)
+    a_w = ax2 - ax1
+    b_off = bx1 - ax1
+
+    vs_diffs = []
+    for i in range(NUM_CHUNKS):
+        ly = i * chunk_h
+        ca = strip_hsv[ly:ly + chunk_h, :a_w]
+        cb = strip_hsv[ly:ly + chunk_h, b_off:b_off + (bx2 - bx1)]
+        ma = np.mean(ca, axis=(0, 1))
+        mb = np.mean(cb, axis=(0, 1))
+        vs_diffs.append((mb[2] - ma[2]) - (mb[1] - ma[1]))
+
+    avg_vs = float(np.mean(vs_diffs))
+
+    if avg_vs > 40:
         return "stance_can_hit"
 
     return "stance_no_hit"
@@ -167,27 +209,8 @@ def read_strokes_text(frame: np.ndarray) -> bool:
     return white_pixels > 50
 
 
-def detect_bottom_text(frame: np.ndarray) -> str:
-    """Detect what text prompt is shown at the bottom-left.
-
-    Returns one of: 'adjust_angle', 'swing_stance', 'cancel', 'none'
-    Based on pixel patterns in the bottom-left region.
-    """
-    # Bottom-left text region
-    crop = _crop_frac(frame, 0.02, 0.93, 0.20, 0.99)
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-    white_pixels = np.sum(gray > 200)
-
-    if white_pixels > 100:
-        # There's text here — check if it's "Adjust Angle" or "Swing Stance"
-        # Adjust Angle appears when in stance, Swing Stance when near ball
-        return "text_present"
-    return "none"
-
-
 def _load_template(name: str) -> np.ndarray:
     """Load a BGRA template from the templates directory."""
-    import pathlib
     path = pathlib.Path(__file__).parent / "templates" / name
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
@@ -199,7 +222,6 @@ def _load_template(name: str) -> np.ndarray:
 _pin_template = _load_template("pin.png")
 _ball_template = _load_template("balls.png")
 
-_ICON_SCALES = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2)
 _PIN_SCALES = (0.6, 1.0)
 _BALL_SCALES = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 _MATCH_THRESHOLD = 0.96
@@ -207,7 +229,7 @@ _MATCH_THRESHOLD = 0.96
 
 def _match_template(frame_bgr: np.ndarray, template_bgra: np.ndarray,
                     threshold: float = _MATCH_THRESHOLD,
-                    scales: tuple[float, ...] = _ICON_SCALES,
+                    scales: tuple[float, ...] = _BALL_SCALES,
                     ) -> list[tuple[int, int, float, float]]:
     """Match a BGRA template at multiple scales using TM_CCORR_NORMED.
 

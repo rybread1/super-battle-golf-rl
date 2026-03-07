@@ -4,15 +4,13 @@ Run this while playing Super Battle Golf manually to see what the
 detection system is picking up. Press 'q' to quit.
 
 Displays:
-- Pin icon detection (position + match info)
-- Ball icon detection (position + match info)
+- Player state (none / near_ball / stance_no_hit / stance_can_hit / swinging)
+- Pin and ball icon detection (position)
 - Player progress bar reading (0-1)
-- Stance detection (power bar)
 - Loading screen detection
-- Bottom text detection
 - Strokes text detection
-- Distance OCR readings (ball/pin meters)
-- Ball icon edge warnings (near top/bottom = bad)
+- Distance OCR readings (ball/pin meters, optional)
+- Ball icon edge warnings (near top/bottom = walked away)
 - Reward calculations (step penalty, progress delta)
 - Frame rate
 """
@@ -102,10 +100,111 @@ def draw_progress_bar_region(img):
     cv2.rectangle(img, (x1, y1), (x2, y2), CYAN, 1)
 
 
+def draw_power_bar_debug(img, frame_rgb):
+    """Draw chunked power bar comparison — splits the bar vertically into
+    horizontal chunks, compares outside vs inside for each chunk locally,
+    then averages. This cancels out background variation along the bar height.
+
+    >>> ADJUST THESE to tune the two strips and chunk count <<<
+    """
+    h, w = img.shape[:2]
+
+    # ---- Strip positions (fractional x coords) ----
+    A_LEFT, A_RIGHT = 0.244, 0.258   # outside the bar
+    B_LEFT, B_RIGHT = 0.258, 0.272   # inside the bar
+
+    # ---- Vertical extent of the bar ----
+    BAR_TOP, BAR_BOT = 0.48, 0.84
+
+    # ---- Number of horizontal chunks ----
+    NUM_CHUNKS = 12
+
+    # Pixel coords for the full strips
+    ax1, ax2 = int(A_LEFT * w), int(A_RIGHT * w)
+    bx1, bx2 = int(B_LEFT * w), int(B_RIGHT * w)
+    y_top, y_bot = int(BAR_TOP * h), int(BAR_BOT * h)
+    chunk_h = (y_bot - y_top) // NUM_CHUNKS
+
+    # Convert full strip region to HSV once
+    strip_rgb = frame_rgb[y_top:y_bot, ax1:bx2]
+    strip_hsv = cv2.cvtColor(strip_rgb, cv2.COLOR_RGB2HSV).astype(float)
+
+    # Per-chunk metrics across multiple color spaces
+    chunk_data = []
+
+    for i in range(NUM_CHUNKS):
+        cy1 = y_top + i * chunk_h
+        cy2 = cy1 + chunk_h
+        local_y1 = i * chunk_h
+        local_y2 = local_y1 + chunk_h
+
+        # Draw chunk boundaries
+        cv2.rectangle(img, (ax1, cy1), (ax2, cy2), CYAN, 1)
+        cv2.rectangle(img, (bx1, cy1), (bx2, cy2), MAGENTA, 1)
+
+        # RGB means
+        ca_rgb = frame_rgb[cy1:cy2, ax1:ax2].astype(float)
+        cb_rgb = frame_rgb[cy1:cy2, bx1:bx2].astype(float)
+        ma_rgb = np.mean(ca_rgb, axis=(0, 1))
+        mb_rgb = np.mean(cb_rgb, axis=(0, 1))
+
+        # HSV means (from pre-converted strip)
+        a_rel_x1, a_rel_x2 = 0, ax2 - ax1
+        b_rel_x1, b_rel_x2 = bx1 - ax1, bx2 - ax1
+        ca_hsv = strip_hsv[local_y1:local_y2, a_rel_x1:a_rel_x2]
+        cb_hsv = strip_hsv[local_y1:local_y2, b_rel_x1:b_rel_x2]
+        ma_hsv = np.mean(ca_hsv, axis=(0, 1))  # [H, S, V]
+        mb_hsv = np.mean(cb_hsv, axis=(0, 1))
+
+        d = {
+            "rgb_diff": float(np.sqrt(np.sum((ma_rgb - mb_rgb) ** 2))),
+            "r_diff": mb_rgb[0] - ma_rgb[0],
+            "g_diff": mb_rgb[1] - ma_rgb[1],
+            "b_diff": mb_rgb[2] - ma_rgb[2],
+            "h_a": ma_hsv[0], "s_a": ma_hsv[1], "v_a": ma_hsv[2],
+            "h_b": mb_hsv[0], "s_b": mb_hsv[1], "v_b": mb_hsv[2],
+            "h_diff": mb_hsv[0] - ma_hsv[0],
+            "s_diff": mb_hsv[1] - ma_hsv[1],  # saturation change
+            "v_diff": mb_hsv[2] - ma_hsv[2],  # value/brightness change
+        }
+        chunk_data.append(d)
+
+        # Per-chunk vs_diff (the metric used in detect.py)
+        vs = d['v_diff'] - d['s_diff']
+        d['vs_diff'] = vs
+        lbl_color = GREEN if vs > 40 else RED
+        cv2.putText(img, f"{vs:+.0f}", (bx2 + 4, cy1 + chunk_h // 2 + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, lbl_color, 1, cv2.LINE_AA)
+
+    # The key metric: avg(v_diff - s_diff) — matches detect.py threshold of 40
+    avg_vs = float(np.mean([d["vs_diff"] for d in chunk_data]))
+    result = "CAN HIT" if avg_vs > 40 else "NO HIT"
+    result_color = GREEN if avg_vs > 40 else RED
+
+    # Labels at top
+    draw_text(img, "A", (ax1, y_top - 6), CYAN, 0.4)
+    draw_text(img, "B", (bx1, y_top - 6), MAGENTA, 0.4)
+
+    # Panel showing the decision metric
+    panel_x = w // 2 - 180
+    panel_y = h - 140
+    lines = [
+        ("=== POWER BAR DEBUG ===", YELLOW),
+        (f"avg(V_diff - S_diff): {avg_vs:+.1f}  (threshold: 40)", result_color),
+        (f"Result: {result}", result_color),
+        ("--- per-chunk V-S diff ---", WHITE),
+        (f"  {' '.join(f'{d['vs_diff']:+.0f}' for d in chunk_data)}", WHITE),
+    ]
+    draw_panel(img, panel_x, panel_y, 370, lines)
+
+    return chunk_data
+
+
 def main():
     # OCR is slow -- allow disabling it
     use_ocr = "--ocr" in sys.argv
     show_zones = "--zones" in sys.argv
+    show_power_debug = "--power" in sys.argv
 
     print("Finding game window...")
     hwnd = find_game_window(timeout=10)
@@ -130,6 +229,9 @@ def main():
     player_state = "none"
     loading = False
     strokes_visible = False
+    dbg_mouse_score = 0.0
+    dbg_f_key_score = 0.0
+    dbg_near_score = 0.0
 
     # How often to run each detection (every N frames)
     ICON_INTERVAL = 5      # template matching is the bottleneck
@@ -137,7 +239,9 @@ def main():
     CHEAP_INTERVAL = 2     # stance, loading, text checks
 
     print("Debug overlay running. Press 'q' in the overlay window to quit.")
-    print("Options: --ocr (enable distance OCR, slow), --zones (show exclusion zones)")
+    print("Options: --ocr (distance OCR), --zones (exclusion zones), --power (power bar debug)")
+    print("Keys: q=quit, r=reset progress, z=zones, o=OCR, p=power bar debug")
+    print("Keys: q=quit, r=reset progress, z=zones, o=OCR, p=power bar debug")
 
     while True:
         frame = cap.grab()
@@ -171,6 +275,15 @@ def main():
             player_state = detect_player_state(frame)
             loading = is_loading_screen(frame)
             strokes_visible = read_strokes_text(frame)
+            # Grab intermediate values for debug display
+            from sbg.detect import (_match_ui_icon, _mouse_icon_tmpl,
+                                    _f_key_icon_tmpl, _near_ball_icon_tmpl)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            _bl = (0.0, 0.85, 0.15, 1.0)
+            dbg_mouse_score = _match_ui_icon(frame_gray, _mouse_icon_tmpl, _bl)
+            dbg_f_key_score = _match_ui_icon(frame_gray, _f_key_icon_tmpl,
+                                             (0.0, 0.82, 0.15, 0.95))
+            dbg_near_score = _match_ui_icon(frame_gray, _near_ball_icon_tmpl, _bl)
 
         # OCR distances (throttled - every 30 frames if enabled)
         if use_ocr:
@@ -202,6 +315,9 @@ def main():
         if show_zones:
             draw_exclusion_zones(display)
             draw_progress_bar_region(display)
+
+        if show_power_debug:
+            draw_power_bar_debug(display, frame)
 
         # Draw icon detections
         if pin_pos:
@@ -241,6 +357,9 @@ def main():
         state_lines = [
             ("=== GAME STATE ===", YELLOW),
             (f"Player state: {player_state}", state_colors.get(player_state, WHITE)),
+            (f"Mouse icon:   {dbg_mouse_score:.3f} (>0.9=stance)", GREEN if dbg_mouse_score > 0.9 else WHITE),
+            (f"Near ball:    {dbg_near_score:.3f} (>0.9=near_ball)", GREEN if dbg_near_score > 0.9 else WHITE),
+            (f"F key icon:   {dbg_f_key_score:.3f} (>0.9=swinging)", GREEN if dbg_f_key_score > 0.9 else WHITE),
             (f"Loading:      {'YES' if loading else 'no'}", RED if loading else WHITE),
             (f"Strokes vis:  {'YES' if strokes_visible else 'no'}", WHITE),
         ]
@@ -303,6 +422,10 @@ def main():
             use_ocr = not use_ocr
             ocr_cooldown = 0
             print(f"OCR: {'ON' if use_ocr else 'OFF'}")
+        elif key == ord("p"):
+            # Toggle power bar debug
+            show_power_debug = not show_power_debug
+            print(f"Power bar debug: {'ON' if show_power_debug else 'OFF'}")
 
     cap.stop()
     cv2.destroyAllWindows()
