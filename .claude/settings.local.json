@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/ryano/.local/bin/uv.exe run:*)",
+      "Read(//c/Users/ryano/.EasyOCR/model/**)",
+      "Bash(python -c \":*)",
+      "Bash(PYTHONIOENCODING=utf-8 :/Users/ryano/.local/bin/uv.exe run:*)",
+      "Bash(/c/Users/ryano/.local/bin/uv.exe run:*)",
+      "Bash(powershell.exe:*)"
+    ]
+  }
+}

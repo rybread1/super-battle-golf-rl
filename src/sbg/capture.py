@@ -18,9 +18,15 @@ class ScreenCapture:
             import dxcam
 
             self._camera = dxcam.create(device_idx=self.monitor)
+            # dxcam expects (left, top, right, bottom) but our region is
+            # (left, top, width, height) — convert here
+            dxcam_region = None
+            if self.region:
+                l, t, w, h = self.region
+                dxcam_region = (l, t, l + w, t + h)
             self._camera.start(
                 target_fps=self.fps,
-                region=self.region,
+                region=dxcam_region,
             )
         except Exception:
             self._use_dxcam = False

@@ -29,9 +29,8 @@ from sbg.capture import ScreenCapture
 from sbg.detect import (
     find_icons,
     get_player_progress,
-    is_in_stance,
+    detect_player_state,
     is_loading_screen,
-    detect_bottom_text,
     read_strokes_text,
 )
 from sbg.reward import (
@@ -90,12 +89,8 @@ def draw_exclusion_zones(img):
     """Draw semi-transparent exclusion zones."""
     h, w = img.shape[:2]
     overlay = img.copy()
-    # Progress bar area: top 12% & left 40%
+    # Progress bar area: top 12% & left 40% (only remaining exclusion zone)
     cv2.rectangle(overlay, (0, 0), (int(w * 0.40), int(h * 0.12)), (100, 0, 0), -1)
-    # Club selector: right 22%
-    cv2.rectangle(overlay, (int(w * 0.78), 0), (w, h), (100, 0, 0), -1)
-    # Bottom strip: bottom 5%
-    cv2.rectangle(overlay, (0, int(h * 0.95)), (w, h), (100, 0, 0), -1)
     cv2.addWeighted(overlay, 0.2, img, 0.8, 0, img)
 
 
@@ -132,9 +127,8 @@ def main():
     pin_pos = None
     ball_pos = None
     progress = None
-    stance = False
+    player_state = "none"
     loading = False
-    bottom_text = "none"
     strokes_visible = False
 
     # How often to run each detection (every N frames)
@@ -174,9 +168,8 @@ def main():
 
         # Cheap detections
         if frame_count % CHEAP_INTERVAL == 0:
-            stance = is_in_stance(frame)
+            player_state = detect_player_state(frame)
             loading = is_loading_screen(frame)
-            bottom_text = detect_bottom_text(frame)
             strokes_visible = read_strokes_text(frame)
 
         # OCR distances (throttled - every 30 frames if enabled)
@@ -238,11 +231,17 @@ def main():
 
         # State panel (right side)
         state_x = w - 310
+        state_colors = {
+            "none": WHITE,
+            "near_ball": YELLOW,
+            "stance_no_hit": ORANGE,
+            "stance_can_hit": GREEN,
+            "swinging": CYAN,
+        }
         state_lines = [
             ("=== GAME STATE ===", YELLOW),
-            (f"In stance:    {'YES' if stance else 'no'}", GREEN if stance else WHITE),
+            (f"Player state: {player_state}", state_colors.get(player_state, WHITE)),
             (f"Loading:      {'YES' if loading else 'no'}", RED if loading else WHITE),
-            (f"Bottom text:  {bottom_text}", WHITE),
             (f"Strokes vis:  {'YES' if strokes_visible else 'no'}", WHITE),
         ]
         draw_panel(display, state_x, 10, 300, state_lines)

@@ -28,29 +28,56 @@ def _crop_frac(frame: np.ndarray, left: float, top: float, right: float, bottom:
     return frame[int(top * h):int(bottom * h), int(left * w):int(right * w)]
 
 
-def is_in_stance(frame: np.ndarray) -> bool:
-    """Detect if the player is in swing stance.
+def detect_player_state(frame: np.ndarray) -> str:
+    """Detect the player's current state from bottom-left text and UI elements.
 
-    The power bar has distinctive white dots (small bright circles) at
-    regular intervals. These dots are unique to the stance UI and don't
-    appear elsewhere. We scan the left ~40% of the screen for a vertical
-    column of very bright white pixels that indicates the bar is present.
+    Returns one of:
+        'none'          — not near ball, not in stance
+        'near_ball'     — standing near ball, not in stance ("Swing Stance [HOLD]")
+        'stance_no_hit' — in stance but too far to hit (faint power bar, no angle selector)
+        'stance_can_hit'— in stance and close enough to hit (solid power bar + angle selector)
+        'swinging'      — actively swinging (power bar filling, "Cancel" text visible)
     """
     h, w = frame.shape[:2]
 
-    # Scan the left 40% of the screen, middle 60% vertically
-    # (the bar appears in this general area regardless of camera angle)
-    search = frame[int(h * 0.30):int(h * 0.90), 0:int(w * 0.40)]
-    gray = cv2.cvtColor(search, cv2.COLOR_RGB2GRAY)
+    # Bottom-left text region — "Adjust Angle" or "Swing Stance [HOLD]"
+    text_crop = _crop_frac(frame, 0.04, 0.93, 0.30, 0.99)
+    text_gray = cv2.cvtColor(text_crop, cv2.COLOR_RGB2GRAY)
+    text_white = int(np.sum(text_gray > 200))
 
-    # The white dots are very bright (>240) and small
-    bright_mask = gray > 240
-    bright_count = np.sum(bright_mask)
+    if text_white < 100:
+        return "none"
 
-    # In stance: the power bar dots create a cluster of bright pixels
-    # Typically 3-4 dots with ~50-100 bright pixels each = 150-400 total
-    # When walking: very few pixels this bright in that region
-    return bright_count > 80
+    # Measure text width to distinguish "Swing Stance [HOLD]" (wide) from "Adjust Angle" (narrow)
+    cols = np.where(np.any(text_gray > 200, axis=0))[0]
+    text_width = int(cols[-1] - cols[0]) if len(cols) > 1 else 0
+
+    if text_width > 180:
+        return "near_ball"
+
+    # We have "Adjust Angle" — check for "Cancel" text above it (visible when swinging)
+    cancel_crop = _crop_frac(frame, 0.02, 0.89, 0.15, 0.93)
+    cancel_gray = cv2.cvtColor(cancel_crop, cv2.COLOR_RGB2GRAY)
+    cancel_white = int(np.sum(cancel_gray > 200))
+
+    if cancel_white > 200:
+        return "swinging"
+
+    # Check power bar opacity to distinguish "can hit" (solid bar, low std)
+    # from "can't hit" (faint/transparent bar blending with background, high std)
+    bar_crop = _crop_frac(frame, 0.075, 0.35, 0.095, 0.80)
+    bar_gray = cv2.cvtColor(bar_crop, cv2.COLOR_RGB2GRAY)
+    bar_std = float(np.std(bar_gray))
+
+    if bar_std < 30:
+        return "stance_can_hit"
+
+    return "stance_no_hit"
+
+
+def is_in_stance(frame: np.ndarray) -> bool:
+    """Detect if the player is in swing stance (any stance state)."""
+    return detect_player_state(frame) in ("stance_no_hit", "stance_can_hit", "swinging")
 
 
 def is_loading_screen(frame: np.ndarray) -> bool:

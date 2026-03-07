@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--no-launch", action="store_true")
     parser.add_argument("--duration", type=float, default=60.0, help="Recording duration in seconds")
     parser.add_argument("--interval", type=float, default=0.5, help="Seconds between captures")
+    parser.add_argument("--dir", type=str, default="gameplay", help="Subdirectory name under screenshots/")
     args = parser.parse_args()
 
     hwnd, region = setup_game_window(launch=not args.no_launch)
@@ -31,9 +32,11 @@ def main():
     cap.start()
     time.sleep(1)
 
-    os.makedirs("screenshots/gameplay", exist_ok=True)
+    out_dir = f"screenshots/{args.dir}"
+    os.makedirs(out_dir, exist_ok=True)
 
     print(f"Recording for {args.duration}s (every {args.interval}s) — play the game!")
+    print(f"Saving to {out_dir}/")
     print("Press Ctrl+C to stop early.\n")
 
     start = time.time()
@@ -44,7 +47,7 @@ def main():
             frame = cap.grab()
             if frame is not None:
                 elapsed = time.time() - start
-                path = f"screenshots/gameplay/{frame_num:04d}_{elapsed:.1f}s.png"
+                path = f"{out_dir}/{frame_num:04d}_{elapsed:.1f}s.png"
                 cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                 frame_num += 1
             time.sleep(args.interval)
@@ -52,7 +55,7 @@ def main():
         print("\nStopped early.")
 
     cap.stop()
-    print(f"Saved {frame_num} frames to screenshots/gameplay/")
+    print(f"Saved {frame_num} frames to {out_dir}/")
 
 
 if __name__ == "__main__":
