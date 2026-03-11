@@ -68,9 +68,14 @@ def main():
     out_dir = f"screenshots/{args.dir}"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Count existing frames to avoid overwriting
-    existing = [f for f in os.listdir(out_dir) if f.endswith(".png")]
-    frame_num = len(existing)
+    # Start numbering after the highest existing frame index
+    import re
+    existing_nums = []
+    for f in os.listdir(out_dir):
+        m = re.match(r"(\d+)_", f)
+        if m:
+            existing_nums.append(int(m.group(1)))
+    frame_num = max(existing_nums) + 1 if existing_nums else 0
 
     auto_mode = args.interval > 0
     mode_str = f"every {args.interval}s" if auto_mode else "SPACE to capture"

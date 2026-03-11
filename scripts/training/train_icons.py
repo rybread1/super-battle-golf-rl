@@ -81,10 +81,11 @@ def train(args):
             targets = {key: batch[key].to(device) for key in TARGETS}
 
             pred = model(images)
-            loss = icon_loss(pred, targets)
+            loss = icon_loss(pred, targets, heatmaps=model._heatmaps)
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item() * images.size(0)
 
@@ -101,7 +102,7 @@ def train(args):
                 targets = {key: batch[key].to(device) for key in TARGETS}
 
                 pred = model(images)
-                loss = icon_loss(pred, targets)
+                loss = icon_loss(pred, targets, heatmaps=model._heatmaps)
                 val_loss += loss.item() * images.size(0)
 
                 for key in TARGETS:
