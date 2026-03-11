@@ -44,7 +44,7 @@ def train(args):
 
     model = IconNet().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                  weight_decay=1e-4)
+                                  weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=args.patience,
     )
@@ -187,6 +187,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--patience", type=int, default=5,
                         help="LR scheduler patience (epochs without val improvement)")
+    parser.add_argument("--weight-decay", type=float, default=1e-3,
+                        help="AdamW weight decay (default: 1e-3)")
     parser.add_argument("--output", default="checkpoints/icon_net",
                         help="Directory to save checkpoints")
     args = parser.parse_args()

@@ -9,8 +9,9 @@ Targets:
     ball      — actual golf ball in the scene
     pin       — actual flagstick on the green
 
-Architecture: 5-block backbone with skip connections → spatial heatmap heads
-with soft-argmax for precise localization.
+Architecture: 5-block backbone → FPN (feature pyramid) with top-down pathway
+→ spatial heatmap heads with soft-argmax. Icon heads use coarser P4 features
+(22x40), object heads use finer P3 features (45x80) for better localization.
 """
 
 import torch
@@ -20,8 +21,11 @@ TARGETS = (
     "ball_icon",
     "pin_icon",
     "ball",
-    "pin",
+    # "pin",
 )
+
+# Object heads get finer P3 features; icon heads get coarser P4
+OBJECT_TARGETS = ("ball", "pin")
 
 
 class ConvBlock(nn.Module):
@@ -45,13 +49,13 @@ class ConvBlock(nn.Module):
 class SpatialDetectionHead(nn.Module):
     """Detection head with spatial heatmap and soft-argmax localization.
 
-    Produces a heatmap from multi-scale features (skip connections),
-    then computes expected (x, y) via soft-argmax. Presence is predicted
-    from the global pooled vector.
+    Produces a heatmap from spatial features, then computes expected (x, y)
+    via soft-argmax. Presence is predicted from the global pooled vector.
     """
 
-    def __init__(self, in_channels: int):
+    def __init__(self, in_channels: int, dropout: float = 0.0):
         super().__init__()
+        self.feat_dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 64, 3, padding=1),
             nn.BatchNorm2d(64),
@@ -64,6 +68,7 @@ class SpatialDetectionHead(nn.Module):
         self.presence_fc = nn.Sequential(
             nn.Linear(in_channels, 64),
             nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
             nn.Linear(64, 1),
         )
 
@@ -75,6 +80,7 @@ class SpatialDetectionHead(nn.Module):
         """
         B, C, H, W = features.shape
 
+        features = self.feat_dropout(features)
         heatmap = self.conv(features)                  # (B, 1, H, W)
         heatmap_flat = heatmap.view(B, -1)             # (B, H*W)
         weights = torch.softmax(heatmap_flat, dim=1)   # (B, H*W)
@@ -95,8 +101,10 @@ class SpatialDetectionHead(nn.Module):
 class IconNet(nn.Module):
     """CNN for ball/pin icon and object detection.
 
-    5-block backbone with skip connections from block 3 to the final
-    feature map, giving heads both fine detail and high-level semantics.
+    5-block backbone with Feature Pyramid Network (FPN) providing multi-scale
+    features. Icon heads (ball_icon, pin_icon) use P4 (22x40) for coarse
+    localization. Object heads (ball, pin) use P3 (45x80) for finer spatial
+    precision.
 
     Input shape: (B, 3, 360, 640) — RGB, channels-first.
     Output: dict with tensors per target, each (B, 3):
@@ -108,7 +116,7 @@ class IconNet(nn.Module):
     INPUT_H = 360
     INPUT_W = 640
 
-    def __init__(self):
+    def __init__(self, dropout: float = 0.2):
         super().__init__()
         # 5 conv blocks with pooling
         self.block1 = ConvBlock(3, 32)      # 360x640 -> 180x320
@@ -117,37 +125,60 @@ class IconNet(nn.Module):
         self.block4 = ConvBlock(128, 128)   # -> 22x40
         self.block5 = ConvBlock(128, 128)   # -> 11x20
 
-        # Skip connection: upsample block5 and concat with block4 output
-        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        # Fuse skip (128 from block4 + 128 from block5 upsampled = 256 -> 128)
-        self.skip_fuse = nn.Sequential(
-            nn.Conv2d(256, 128, 1),
-            nn.BatchNorm2d(128),
+        # FPN: lateral connections (project to common channel count)
+        fpn_ch = 128
+        self.lateral5 = nn.Conv2d(128, fpn_ch, 1)
+        self.lateral4 = nn.Conv2d(128, fpn_ch, 1)
+        self.lateral3 = nn.Conv2d(128, fpn_ch, 1)
+
+        # FPN: smoothing convs after top-down addition (reduce aliasing)
+        self.smooth4 = nn.Sequential(
+            nn.Conv2d(fpn_ch, fpn_ch, 3, padding=1),
+            nn.BatchNorm2d(fpn_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.smooth3 = nn.Sequential(
+            nn.Conv2d(fpn_ch, fpn_ch, 3, padding=1),
+            nn.BatchNorm2d(fpn_ch),
             nn.ReLU(inplace=True),
         )
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Icon heads on P4 (22x40), object heads on P3 (45x80)
         self.heads = nn.ModuleDict({
-            name: SpatialDetectionHead(128) for name in TARGETS
+            name: SpatialDetectionHead(fpn_ch, dropout=dropout)
+            for name in TARGETS
         })
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        # Backbone
         x1 = self.block1(x)
         x2 = self.block2(x1)
-        x3 = self.block3(x2)
-        x4 = self.block4(x3)    # 22x40, 128ch — fine spatial detail
-        x5 = self.block5(x4)    # 11x20, 128ch — high-level semantics
+        x3 = self.block3(x2)   # 45x80, 128ch
+        x4 = self.block4(x3)   # 22x40, 128ch
+        x5 = self.block5(x4)   # 11x20, 128ch
 
-        # Skip connection: upsample x5 to x4's size and fuse
-        x5_up = self.upsample(x5)  # 11x20 -> 22x40
-        fused = self.skip_fuse(torch.cat([x4, x5_up], dim=1))  # 256 -> 128
+        # FPN top-down pathway
+        p5 = self.lateral5(x5)                                      # 11x20
+        p4 = self.lateral4(x4) + nn.functional.interpolate(
+            p5, size=x4.shape[2:], mode="bilinear", align_corners=False
+        )
+        p4 = self.smooth4(p4)                                       # 22x40
+        p3 = self.lateral3(x3) + nn.functional.interpolate(
+            p4, size=x3.shape[2:], mode="bilinear", align_corners=False
+        )
+        p3 = self.smooth3(p3)                                       # 45x80
 
-        pooled = self.pool(fused).flatten(1)
+        # Pool from P4 for all heads (global context)
+        pooled = self.pool(p4).flatten(1)
 
         result = {}
         heatmaps = {}
         for name, head in self.heads.items():
-            pred, heatmap = head(fused, pooled)
+            # Object heads get finer P3 features, icon heads get P4
+            features = p3 if name in OBJECT_TARGETS else p4
+            pred, heatmap = head(features, pooled)
             result[name] = pred
             heatmaps[name] = heatmap
 
