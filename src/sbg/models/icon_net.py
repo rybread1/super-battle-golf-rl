@@ -75,11 +75,11 @@ class IconNet(nn.Module):
             ConvBlock(3, 32),     # 180x320 -> 90x160
             ConvBlock(32, 64),    # -> 45x80
             ConvBlock(64, 128),   # -> 22x40
-            ConvBlock(128, 256),  # -> 11x20
+            ConvBlock(128, 128),  # -> 11x20
         )
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.heads = nn.ModuleDict({
-            name: DetectionHead(256) for name in TARGETS
+            name: DetectionHead(128) for name in TARGETS
         })
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:

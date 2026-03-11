@@ -6,8 +6,9 @@ Train an RL agent to play Super Battle Golf (Steam, ID 4069520) end-to-end via s
 ## How It Works
 - **Screen capture** (dxcam) grabs 1280x720 frames from the game window
 - **Computer vision** (OpenCV template matching, color analysis) extracts game state from pixels
+- **CNN detection** (IconNet) detects ball/pin icons and actual ball/pin objects
 - **Gymnasium environment** wraps the game loop: observation is an 84x84 RGB frame, actions are movement or shot attempts
-- **Stable Baselines 3** trains the policy
+- **Stable Baselines 3** trains the RL policy
 
 The agent alternates between two phases each hole:
 1. **Navigation** — walk toward the ball (forward, forward+left, forward+right)
@@ -18,30 +19,48 @@ The agent alternates between two phases each hole:
 - `src/sbg/reward.py` — Reward constants and computation
 - `src/sbg/game/` — Game interaction layer
   - `actions.py` — Keyboard input helpers
-  - `capture.py` — dxcam screen capture
+  - `capture.py` — dxcam screen capture (validates 1280x720)
   - `window.py` — Game window management
   - `navigate.py` — Menu navigation, hole transitions
 - `src/sbg/vision/` — Computer vision detection
   - `detect.py` — CV detection (icons, progress bar, stance, loading screen)
   - `templates/` — BGRA template images for icon matching
 - `src/sbg/models/` — Learned models
-  - `icon_net.py` — CNN for ball/pin icon detection (320x180 input, ~456K params)
-  - `dataset.py` — Dataset loader for annotated frames (JSON format)
-  - `loss.py` — Loss function (BCE + smooth L1)
-- `scripts/` — Scripts organized by purpose
-  - `training/train.py` — RL training entrypoint (SB3 PPO)
-  - `training/train_icons.py` — Training script for icon detection CNN
-  - `tools/debug_overlay.py` — Live debug visualization
-  - `tools/record_gameplay.py` — Record gameplay screenshots
-  - `tools/screenshot.py` — Single screenshot capture
-  - `tools/start_game.py` — Launch game and navigate to match
-- `screenshots/` — Recorded gameplay frames for offline testing
+  - `icon_net.py` — CNN for ball/pin icon + object detection (320x180 input, ~309K params)
+  - `dataset.py` — Dataset loader with augmentation (flip, crop/zoom, color jitter, blur, noise)
+  - `loss.py` — Loss function (BCE presence + 5x-weighted smooth L1 coordinates)
+- `scripts/training/` — Training scripts
+  - `train.py` — RL training entrypoint (SB3 PPO)
+  - `train_icons.py` — CNN training with TensorBoard, ReduceLROnPlateau, checkpoint resume
+- `scripts/tools/` — Utilities
+  - `annotate.py` — Click-to-annotate tool (4 targets: ball_icon, pin_icon, ball, pin)
+  - `debug_overlay.py` — Live debug visualization
+  - `record_gameplay.py` — Record gameplay screenshots (validates frame dimensions)
+  - `reorder_frames.py` — Fix duplicate frame numbering across recording sessions
+  - `screenshot.py` — Single screenshot capture
+  - `start_game.py` — Launch game and navigate to match
+- `screenshots/` — Recorded gameplay frames and annotations
+- `checkpoints/` — Saved model weights
+- `runs/` — TensorBoard logs
+
+## CNN Detection (IconNet)
+Four detection targets, each with presence + (x, y) coordinates:
+- `ball_icon` — UI ball indicator overlay
+- `pin_icon` — UI flag indicator overlay
+- `ball` — actual golf ball in the scene (important when close and icon disappears)
+- `pin` — actual flagstick on the green
+
+Training: `uv run python scripts/training/train_icons.py --data screenshots/cnn_training/annotations.json --name v1`
+Resume: `--resume checkpoints/icon_net/v1_best.pt`
+TensorBoard: `uv run tensorboard --logdir runs/icon_net`
+Annotation: `uv run python scripts/tools/annotate.py --dir cnn_training`
 
 ## Gotchas and Known Issues
+- **Game must be 1280x720 windowed** — all detection regions and CNN input are calibrated to this resolution.
 - **Template matching false positives** — autumn trees (green+orange) and the progress bar flag (top-left) can look like icons. Filtered by UI exclusion zones and orange pixel count bounds.
 - **UI exclusion zones** — right 22% (club selector), top 12% + left 40% (progress bar area), bottom 8% (prompts). Icon detections in these areas are rejected.
-- **Ball icon at screen edges = bad** — when the ball icon appears near the top or bottom edge of the screen, it means the player has walked away from their ball. This is a critical negative signal the agent needs to learn to avoid.
+- **Ball/pin object labels are sparse** — only ~31% and ~20% of training frames have these visible. Need more close-range recordings to improve CNN accuracy.
+- **Ball icon at screen edges = bad** — when the ball icon appears near the top or bottom edge of the screen, it means the player has walked away from their ball.
 - **Stance detection relies on power bar brightness** — looks for bright white dots (>240) in the left 40% of screen. Can false-positive if other bright UI elements appear there.
-- **Loading screen = hole complete** — a uniform dark purplish-grey frame signals transition between holes. This is how we detect hole completion.
+- **Loading screen = hole complete** — a uniform dark purplish-grey frame signals transition between holes.
 - **Progress bar is the most reliable distance signal** — the dark circle with "?" (player) and orange flag (hole) in the top-left bar.
-- **Game must be 1280x720 windowed** — all detection regions are calibrated to this resolution.
