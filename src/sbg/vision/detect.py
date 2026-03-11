@@ -6,7 +6,6 @@ as fractions of frame size to handle slight resolution differences.
 """
 
 import pathlib
-import re
 
 import cv2
 import numpy as np
@@ -18,17 +17,6 @@ PROGRESS_BAR_RIGHT = 0.3
 PROGRESS_BAR_BOTTOM = 0.11
 PROGRESS_FLAG_FRAC = 0.84       # flag x-position as fraction of bar width
 PROGRESS_POLE_FRAC = 0.86       # flag pole x-position (excluded from player search)
-
-# EasyOCR reader — initialized lazily on first use to avoid slow import
-_easyocr_reader = None
-
-
-def _get_reader():
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        import easyocr
-        _easyocr_reader = easyocr.Reader(["en"], gpu=True, verbose=False)
-    return _easyocr_reader
 
 
 def _crop_frac(frame: np.ndarray, left: float, top: float, right: float, bottom: float) -> np.ndarray:
@@ -460,94 +448,3 @@ def find_ball_icon(frame: np.ndarray) -> tuple[int, int] | None:
     return find_icons(frame)[1]
 
 
-def _find_distance_texts(frame: np.ndarray) -> list[tuple[int, int, int]]:
-    """Find all distance texts ('Xm') in a frame using EasyOCR.
-
-    Returns list of (x, y, distance_meters) for each detected distance text.
-    """
-    h, w = frame.shape[:2]
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-    reader = _get_reader()
-    ocr_results = reader.readtext(frame_bgr, allowlist="0123456789m")
-
-    results = []
-    for bbox, text, conf in ocr_results:
-        if conf < 0.55 or not text:
-            continue
-        # Require 'm' at end — valid distances are like "26m", "295m"
-        if not re.match(r"^\d+m$", text):
-            continue
-        match = re.search(r"(\d+)m", text)
-        if not match:
-            continue
-        val = int(match.group(1))
-        if not 1 <= val <= 999:
-            continue
-        # Compute center of bounding box
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        cx = int(sum(xs) / len(xs))
-        cy = int(sum(ys) / len(ys))
-        # Skip UI areas: right edge (club selector), top-left, bottom strip
-        if cx > w * 0.80:
-            continue
-        if cx < w * 0.15 and cy < h * 0.15:
-            continue
-        if cy > h * 0.90:
-            continue
-        results.append((cx, cy, val))
-
-    return results
-
-
-def detect_distances(frame: np.ndarray) -> dict[str, int | None]:
-    """Detect ball and pin distances in a single pass.
-
-    Finds icon positions via color detection, then reads nearby distance
-    text via OCR. Falls back to full-frame OCR text classification if
-    icon detection misses.
-
-    Returns dict with 'ball' and 'pin' keys (values in meters or None).
-    """
-    result: dict[str, int | None] = {"ball": None, "pin": None}
-    texts = _find_distance_texts(frame)
-    if not texts:
-        return result
-
-    pin_pos = find_pin_icon(frame)
-    ball_pos = find_ball_icon(frame)
-
-    # Match distance texts to their nearest icon (text is ~20-40px above icon)
-    for tx, ty, dist in texts:
-        matched = False
-        if pin_pos and result["pin"] is None:
-            dx = abs(tx - pin_pos[0])
-            dy = ty - pin_pos[1]  # text should be above icon
-            if dx < 50 and -60 < dy < 10:
-                result["pin"] = dist
-                matched = True
-        if ball_pos and result["ball"] is None and not matched:
-            dx = abs(tx - ball_pos[0])
-            dy = ty - ball_pos[1]
-            if dx < 50 and -60 < dy < 10:
-                result["ball"] = dist
-                matched = True
-
-    return result
-
-
-def detect_ball_distance(frame: np.ndarray) -> int | None:
-    """Detect the distance-to-ball marker.
-
-    Returns distance in meters, or None if not detected.
-    """
-    return detect_distances(frame)["ball"]
-
-
-def detect_pin_distance(frame: np.ndarray) -> int | None:
-    """Detect the distance-to-pin marker.
-
-    Returns distance in meters, or None if not detected.
-    """
-    return detect_distances(frame)["pin"]

@@ -5,7 +5,7 @@ Train an RL agent to play Super Battle Golf (Steam, ID 4069520) end-to-end via s
 
 ## How It Works
 - **Screen capture** (dxcam) grabs 1280x720 frames from the game window
-- **Computer vision** (OpenCV template matching, color analysis, OCR) extracts game state from pixels
+- **Computer vision** (OpenCV template matching, color analysis) extracts game state from pixels
 - **Gymnasium environment** wraps the game loop: observation is an 84x84 RGB frame, actions are movement or shot attempts
 - **Stable Baselines 3** trains the policy
 
@@ -22,7 +22,7 @@ The agent alternates between two phases each hole:
   - `window.py` — Game window management
   - `navigate.py` — Menu navigation, hole transitions
 - `src/sbg/vision/` — Computer vision detection
-  - `detect.py` — CV detection (icons, progress bar, stance, loading screen, OCR)
+  - `detect.py` — CV detection (icons, progress bar, stance, loading screen)
   - `templates/` — BGRA template images for icon matching
 - `src/sbg/models/` — Learned models
   - `icon_net.py` — CNN for ball/pin icon detection (320x180 input, ~456K params)
@@ -38,12 +38,10 @@ The agent alternates between two phases each hole:
 - `screenshots/` — Recorded gameplay frames for offline testing
 
 ## Gotchas and Known Issues
-- **EasyOCR is slow to import** — the reader is lazily initialized on first use to avoid blocking startup
 - **Template matching false positives** — autumn trees (green+orange) and the progress bar flag (top-left) can look like icons. Filtered by UI exclusion zones and orange pixel count bounds.
 - **UI exclusion zones** — right 22% (club selector), top 12% + left 40% (progress bar area), bottom 8% (prompts). Icon detections in these areas are rejected.
-- **Tesseract is not on PATH** — installed at `C:\Program Files\Tesseract-OCR\tesseract.exe`
 - **Ball icon at screen edges = bad** — when the ball icon appears near the top or bottom edge of the screen, it means the player has walked away from their ball. This is a critical negative signal the agent needs to learn to avoid.
 - **Stance detection relies on power bar brightness** — looks for bright white dots (>240) in the left 40% of screen. Can false-positive if other bright UI elements appear there.
 - **Loading screen = hole complete** — a uniform dark purplish-grey frame signals transition between holes. This is how we detect hole completion.
-- **Progress bar is the most reliable distance signal** — the dark circle with "?" (player) and orange flag (hole) in the top-left bar. More reliable than OCR distance readings.
+- **Progress bar is the most reliable distance signal** — the dark circle with "?" (player) and orange flag (hole) in the top-left bar.
 - **Game must be 1280x720 windowed** — all detection regions are calibrated to this resolution.

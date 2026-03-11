@@ -1,6 +1,7 @@
-"""Training script for the icon detection CNN.
+"""Training script for the icon/object detection CNN.
 
 Usage:
+    uv run python scripts/training/train_icons.py --data screenshots/cnn_train/annotations.json
     uv run python scripts/training/train_icons.py --data annotations.json --epochs 50
 """
 
@@ -10,7 +11,7 @@ import pathlib
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from sbg.models.icon_net import IconNet
+from sbg.models.icon_net import IconNet, TARGETS
 from sbg.models.dataset import IconDataset
 from sbg.models.loss import icon_loss
 
@@ -52,11 +53,10 @@ def train(args):
         train_loss = 0.0
         for batch in train_loader:
             images = batch["image"].to(device)
-            ball_t = batch["ball"].to(device)
-            pin_t = batch["pin"].to(device)
+            targets = {key: batch[key].to(device) for key in TARGETS}
 
             pred = model(images)
-            loss = icon_loss(pred, ball_t, pin_t)
+            loss = icon_loss(pred, targets)
 
             optimizer.zero_grad()
             loss.backward()
@@ -69,44 +69,37 @@ def train(args):
         # --- Validate ---
         model.eval()
         val_loss = 0.0
-        correct_ball = correct_pin = total = 0
+        correct = {key: 0 for key in TARGETS}
+        total = 0
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device)
-                ball_t = batch["ball"].to(device)
-                pin_t = batch["pin"].to(device)
+                targets = {key: batch[key].to(device) for key in TARGETS}
 
                 pred = model(images)
-                loss = icon_loss(pred, ball_t, pin_t)
+                loss = icon_loss(pred, targets)
                 val_loss += loss.item() * images.size(0)
 
-                # Accuracy: presence classification
-                for key, target, counter_name in [
-                    ("ball", ball_t, "ball"), ("pin", pin_t, "pin")
-                ]:
+                for key in TARGETS:
                     pred_present = (torch.sigmoid(pred[key][:, 0]) > 0.5).float()
-                    actual = target[:, 0]
-                    correct = (pred_present == actual).sum().item()
-                    if counter_name == "ball":
-                        correct_ball += correct
-                    else:
-                        correct_pin += correct
+                    actual = targets[key][:, 0]
+                    correct[key] += (pred_present == actual).sum().item()
                 total += images.size(0)
 
         val_loss /= n_val
-        ball_acc = correct_ball / total * 100 if total > 0 else 0
-        pin_acc = correct_pin / total * 100 if total > 0 else 0
+        acc_str = "  ".join(
+            f"{key}={correct[key] / total * 100:.0f}%" for key in TARGETS
+        )
 
         print(f"Epoch {epoch:3d}/{args.epochs}  "
-              f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
-              f"ball_acc={ball_acc:.1f}%  pin_acc={pin_acc:.1f}%  "
-              f"lr={scheduler.get_last_lr()[0]:.2e}")
+              f"train={train_loss:.4f}  val={val_loss:.4f}  "
+              f"{acc_str}  lr={scheduler.get_last_lr()[0]:.2e}")
 
         # Save best
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), save_dir / "icon_net_best.pt")
-            print(f"  → saved best model (val_loss={val_loss:.4f})")
+            print(f"  -> saved best model (val_loss={val_loss:.4f})")
 
     # Save final
     torch.save(model.state_dict(), save_dir / "icon_net_final.pt")
@@ -114,7 +107,7 @@ def train(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train icon detection CNN")
+    parser = argparse.ArgumentParser(description="Train icon/object detection CNN")
     parser.add_argument("--data", required=True,
                         help="Path to annotations JSON file")
     parser.add_argument("--epochs", type=int, default=50)

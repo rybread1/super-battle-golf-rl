@@ -200,8 +200,6 @@ def draw_power_bar_debug(img, frame_rgb):
 
 
 def main():
-    # OCR is slow -- allow disabling it
-    use_ocr = "--ocr" in sys.argv
     show_zones = "--zones" in sys.argv
     show_power_debug = "--power" in sys.argv
 
@@ -218,9 +216,6 @@ def main():
     prev_time = time.time()
     fps_history = []
     frame_count = 0
-    ocr_result = {"ball": None, "pin": None}
-    ocr_cooldown = 0  # only run OCR every N frames
-
     # Cached detection results (updated on their own schedules)
     progress = None
     player_state = "none"
@@ -239,9 +234,8 @@ def main():
     BALL_INTERVAL = 5      # ball icon (template matching)
 
     print("Debug overlay running. Press 'q' in the overlay window to quit.")
-    print("Options: --ocr (distance OCR), --zones (exclusion zones), --power (power bar debug)")
-    print("Keys: q=quit, r=reset progress, z=zones, o=OCR, p=power bar debug")
-    print("Keys: q=quit, r=reset progress, z=zones, o=OCR, p=power bar debug")
+    print("Options: --zones (exclusion zones), --power (power bar debug)")
+    print("Keys: q=quit, r=reset progress, z=zones, p=power bar debug")
 
     while True:
         frame = cap.grab()
@@ -290,14 +284,6 @@ def main():
             else:
                 ball_x_frac = None
                 ball_y_frac = None
-
-        # OCR distances (throttled - every 30 frames if enabled)
-        if use_ocr:
-            ocr_cooldown -= 1
-            if ocr_cooldown <= 0:
-                from sbg.vision.detect import detect_distances
-                ocr_result = detect_distances(frame)
-                ocr_cooldown = 30
 
         # Progress delta
         progress_delta = None
@@ -393,12 +379,6 @@ def main():
         else:
             det_lines.append(("Ball icon: not found", RED))
 
-        if use_ocr:
-            ball_d = ocr_result.get("ball")
-            pin_d = ocr_result.get("pin")
-            det_lines.append((f"Ball dist:  {f'{ball_d}m' if ball_d else 'N/A'} (OCR)", MAGENTA))
-            det_lines.append((f"Pin dist:   {f'{pin_d}m' if pin_d else 'N/A'} (OCR)", MAGENTA))
-
         draw_panel(display, state_x, 120, 300, det_lines)
 
         # FPS + frame info (top left)
@@ -426,11 +406,6 @@ def main():
             # Toggle exclusion zones
             show_zones = not show_zones
             print(f"Exclusion zones: {'ON' if show_zones else 'OFF'}")
-        elif key == ord("o"):
-            # Toggle OCR
-            use_ocr = not use_ocr
-            ocr_cooldown = 0
-            print(f"OCR: {'ON' if use_ocr else 'OFF'}")
         elif key == ord("p"):
             # Toggle power bar debug
             show_power_debug = not show_power_debug

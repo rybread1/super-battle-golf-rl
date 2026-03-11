@@ -6,7 +6,13 @@
       "Bash(python -c \":*)",
       "Bash(PYTHONIOENCODING=utf-8 :/Users/ryano/.local/bin/uv.exe run:*)",
       "Bash(/c/Users/ryano/.local/bin/uv.exe run:*)",
-      "Bash(powershell.exe:*)"
+      "Bash(powershell.exe:*)",
+      "Bash(ls:*)",
+      "Bash(uv run:*)",
+      "Bash(python:*)",
+      "Bash(cd /c/Users/ryano/workspace/projects/super-battle-golf-rl/scripts && mv train.py train_icons.py training/ && mv debug_overlay.py record_gameplay.py screenshot.py start_game.py tools/)",
+      "Bash(git add CLAUDE.md pyproject.toml src/sbg/env.py src/sbg/reward.py uv.lock scripts/tools/ scripts/training/ src/sbg/game/ src/sbg/models/ src/sbg/vision/ scripts/debug_overlay.py scripts/record_gameplay.py scripts/screenshot.py scripts/start_game.py src/sbg/actions.py src/sbg/capture.py src/sbg/detect.py src/sbg/navigate.py src/sbg/train.py src/sbg/window.py src/sbg/templates/)",
+      "Bash(git push)"
     ]
   }
 }

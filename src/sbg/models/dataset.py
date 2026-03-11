@@ -1,10 +1,12 @@
-"""Dataset for icon detection training.
+"""Dataset for icon/object detection training.
 
 Annotation format (JSON):
 {
     "frames": [
         {
             "file": "screenshot_001.png",
+            "ball_icon": [x, y] or null,
+            "pin_icon": [x, y] or null,
             "ball": [x, y] or null,
             "pin": [x, y] or null
         },
@@ -24,11 +26,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from sbg.models.icon_net import IconNet
+from sbg.models.icon_net import IconNet, TARGETS
 
 
 class IconDataset(Dataset):
-    """Dataset of annotated game frames for icon detection training."""
+    """Dataset of annotated game frames for icon/object detection training."""
 
     def __init__(self, annotations_path: str | pathlib.Path,
                  augment: bool = False):
@@ -59,25 +61,21 @@ class IconDataset(Dataset):
         if self.augment:
             img = self._augment(img)
 
-        # HWC uint8 → CHW float32 [0, 1]
+        # HWC uint8 -> CHW float32 [0, 1]
         tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
 
-        # Build targets: (present, x_norm, y_norm) for each icon
-        targets = {}
-        for key in ("ball", "pin"):
+        # Build targets: (present, x_norm, y_norm) for each target
+        result = {"image": tensor}
+        for key in TARGETS:
             coords = entry.get(key)
             if coords is not None:
                 x_norm = coords[0] / orig_w
                 y_norm = coords[1] / orig_h
-                targets[key] = torch.tensor([1.0, x_norm, y_norm])
+                result[key] = torch.tensor([1.0, x_norm, y_norm])
             else:
-                targets[key] = torch.tensor([0.0, 0.0, 0.0])
+                result[key] = torch.tensor([0.0, 0.0, 0.0])
 
-        return {
-            "image": tensor,
-            "ball": targets["ball"],
-            "pin": targets["pin"],
-        }
+        return result
 
     def _augment(self, img: np.ndarray) -> np.ndarray:
         """Simple augmentations that don't move icon positions."""
