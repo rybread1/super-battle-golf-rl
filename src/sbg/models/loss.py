@@ -46,7 +46,8 @@ def icon_loss(pred: dict[str, torch.Tensor],
 
     For each target:
     - BCE loss on presence logit (always)
-    - Smooth L1 loss on (x, y) coordinates (only when target is present)
+    - Smooth L1 loss on (x, y) coordinates, weighted by presence value
+      (supports soft labels from mixup)
     - Heatmap supervision loss (MSE vs gaussian blob, if heatmaps provided)
     """
     total = torch.tensor(0.0, device=next(iter(pred.values())).device)
@@ -54,7 +55,7 @@ def icon_loss(pred: dict[str, torch.Tensor],
     for key in TARGETS:
         p = pred[key]
         t = targets[key]
-        present = t[:, 0]  # (B,)
+        present = t[:, 0]  # (B,) — 0/1 or soft value from mixup
 
         # Presence loss (BCE with logits)
         bce = nn.functional.binary_cross_entropy_with_logits(
@@ -62,12 +63,14 @@ def icon_loss(pred: dict[str, torch.Tensor],
         )
         total = total + bce
 
-        # Coordinate loss (only for present targets)
-        mask = present.bool()
-        if mask.any():
-            coord_pred = p[mask, 1:]      # (N, 2)
-            coord_target = t[mask, 1:]    # (N, 2)
-            coord_loss = nn.functional.smooth_l1_loss(coord_pred, coord_target)
+        # Coordinate loss, weighted by presence (soft-compatible)
+        if present.sum() > 0:
+            coord_pred = p[:, 1:]      # (B, 2)
+            coord_target = t[:, 1:]    # (B, 2)
+            per_sample = nn.functional.smooth_l1_loss(
+                coord_pred, coord_target, reduction="none"
+            ).mean(dim=1)  # (B,)
+            coord_loss = (per_sample * present).sum() / present.sum()
             total = total + coord_loss * 10.0
 
         # Heatmap supervision loss

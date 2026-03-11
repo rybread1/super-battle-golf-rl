@@ -13,6 +13,7 @@ import argparse
 import pathlib
 import time
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
@@ -79,6 +80,16 @@ def train(args):
         for batch in train_loader:
             images = batch["image"].to(device)
             targets = {key: batch[key].to(device) for key in TARGETS}
+
+            # Mixup: blend random pairs of images and labels
+            if args.mixup_alpha > 0:
+                lam = np.random.beta(args.mixup_alpha, args.mixup_alpha)
+                idx = torch.randperm(images.size(0), device=device)
+                images = lam * images + (1 - lam) * images[idx]
+                targets = {
+                    key: lam * targets[key] + (1 - lam) * targets[key][idx]
+                    for key in TARGETS
+                }
 
             pred = model(images)
             loss = icon_loss(pred, targets, heatmaps=model._heatmaps)
@@ -189,6 +200,8 @@ if __name__ == "__main__":
                         help="LR scheduler patience (epochs without val improvement)")
     parser.add_argument("--weight-decay", type=float, default=1e-3,
                         help="AdamW weight decay (default: 1e-3)")
+    parser.add_argument("--mixup-alpha", type=float, default=0.2,
+                        help="Mixup alpha (0 to disable, default: 0.2)")
     parser.add_argument("--output", default="checkpoints/icon_net",
                         help="Directory to save checkpoints")
     args = parser.parse_args()
