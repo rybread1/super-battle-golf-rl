@@ -12,7 +12,9 @@
       "Bash(python:*)",
       "Bash(cd /c/Users/ryano/workspace/projects/super-battle-golf-rl/scripts && mv train.py train_icons.py training/ && mv debug_overlay.py record_gameplay.py screenshot.py start_game.py tools/)",
       "Bash(git add CLAUDE.md pyproject.toml src/sbg/env.py src/sbg/reward.py uv.lock scripts/tools/ scripts/training/ src/sbg/game/ src/sbg/models/ src/sbg/vision/ scripts/debug_overlay.py scripts/record_gameplay.py scripts/screenshot.py scripts/start_game.py src/sbg/actions.py src/sbg/capture.py src/sbg/detect.py src/sbg/navigate.py src/sbg/train.py src/sbg/window.py src/sbg/templates/)",
-      "Bash(git push)"
+      "Bash(git push)",
+      "Bash(ls C:/Users/ryano/workspace/projects/super-battle-golf-rl/README.md 2>/dev/null; echo \"exit: $?\")",
+      "Bash(git add:*)"
     ]
   }
 }
