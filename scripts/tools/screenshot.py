@@ -10,8 +10,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sbg.capture import ScreenCapture
-from sbg.window import setup_game_window
+from sbg.game.capture import ScreenCapture
+from sbg.game.window import setup_game_window
 import cv2
 
 

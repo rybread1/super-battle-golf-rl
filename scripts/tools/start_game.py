@@ -12,9 +12,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sbg.window import setup_game_window
-from sbg.capture import ScreenCapture
-from sbg.navigate import navigate_to_match
+from sbg.game.window import setup_game_window
+from sbg.game.capture import ScreenCapture
+from sbg.game.navigate import navigate_to_match
 
 
 def main():

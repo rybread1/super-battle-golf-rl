@@ -5,12 +5,10 @@ detection system is picking up. Press 'q' to quit.
 
 Displays:
 - Player state (none / near_ball / stance_no_hit / stance_can_hit / swinging)
-- Pin and ball icon detection (position)
 - Player progress bar reading (0-1)
 - Loading screen detection
 - Strokes text detection
 - Distance OCR readings (ball/pin meters, optional)
-- Ball icon edge warnings (near top/bottom = walked away)
 - Reward calculations (step penalty, progress delta)
 - Frame rate
 """
@@ -23,23 +21,26 @@ import numpy as np
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "src"))
 
-from sbg.capture import ScreenCapture
-from sbg.detect import (
-    find_icons,
+from sbg.game.capture import ScreenCapture
+from sbg.vision.detect import (
     get_player_progress,
     detect_player_state,
     is_loading_screen,
     read_strokes_text,
+    find_ball_icon,
 )
 from sbg.reward import (
     STEP_PENALTY,
-    FAILED_SHOT_PENALTY,
-    SUCCESSFUL_SHOT_BONUS,
+    BALL_NAV_REWARD,
+    BALL_NAV_PENALTY,
+    SHOT_BONUS,
+    BAD_SHOT_PENALTY,
     PROGRESS_SCALE,
-    HOLE_BONUS,
-    compute_shot_reward,
+    OOB_PENALTY,
+    HOLE_COMPLETE_BONUS,
+    STROKE_PENALTY,
 )
-from sbg.window import find_game_window, get_client_region
+from sbg.game.window import find_game_window, get_client_region
 
 
 # Colors (BGR for OpenCV)
@@ -75,14 +76,6 @@ def draw_panel(img, x, y, width, lines):
     return y + panel_h + 8
 
 
-def draw_icon_marker(img, pos, label, color, radius=18):
-    """Draw a circle + label at an icon position."""
-    cx, cy = pos
-    cv2.circle(img, (cx, cy), radius, color, 2)
-    cv2.circle(img, (cx, cy), 3, color, -1)
-    draw_text(img, label, (cx + radius + 4, cy - 4), color, 0.45)
-
-
 def draw_exclusion_zones(img):
     """Draw semi-transparent exclusion zones."""
     h, w = img.shape[:2]
@@ -110,14 +103,14 @@ def draw_power_bar_debug(img, frame_rgb):
     h, w = img.shape[:2]
 
     # ---- Strip positions (fractional x coords) ----
-    A_LEFT, A_RIGHT = 0.244, 0.258   # outside the bar
-    B_LEFT, B_RIGHT = 0.258, 0.272   # inside the bar
+    A_LEFT, A_RIGHT = 0.254, 0.262   # outside the bar (overlaps B slightly)
+    B_LEFT, B_RIGHT = 0.260, 0.268   # inside the bar
 
     # ---- Vertical extent of the bar ----
     BAR_TOP, BAR_BOT = 0.48, 0.84
 
     # ---- Number of horizontal chunks ----
-    NUM_CHUNKS = 12
+    NUM_CHUNKS = 24
 
     # Pixel coords for the full strips
     ax1, ax2 = int(A_LEFT * w), int(A_RIGHT * w)
@@ -170,30 +163,36 @@ def draw_power_bar_debug(img, frame_rgb):
         chunk_data.append(d)
 
         # Per-chunk vs_diff (the metric used in detect.py)
-        vs = d['v_diff'] - d['s_diff']
+        vs = abs(d['v_diff']) + abs(d['s_diff'])
         d['vs_diff'] = vs
-        lbl_color = GREEN if vs > 40 else RED
+        lbl_color = GREEN if vs > 20 else RED
         cv2.putText(img, f"{vs:+.0f}", (bx2 + 4, cy1 + chunk_h // 2 + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, lbl_color, 1, cv2.LINE_AA)
 
-    # The key metric: avg(v_diff - s_diff) — matches detect.py threshold of 40
-    avg_vs = float(np.mean([d["vs_diff"] for d in chunk_data]))
-    result = "CAN HIT" if avg_vs > 40 else "NO HIT"
-    result_color = GREEN if avg_vs > 40 else RED
+    # Metrics matching detect.py: median + consistency
+    vs_vals = [d["vs_diff"] for d in chunk_data]
+    median_vs = float(np.median(vs_vals))
+    chunks_above = sum(1 for v in vs_vals if v > 20)
+    consistency = chunks_above / NUM_CHUNKS
+    can_hit = median_vs > 35 and consistency > 0.6
+    result = "CAN HIT" if can_hit else "NO HIT"
+    result_color = GREEN if can_hit else RED
 
     # Labels at top
     draw_text(img, "A", (ax1, y_top - 6), CYAN, 0.4)
     draw_text(img, "B", (bx1, y_top - 6), MAGENTA, 0.4)
 
-    # Panel showing the decision metric
+    # Panel showing the decision metrics
     panel_x = w // 2 - 180
-    panel_y = h - 140
+    panel_y = h - 160
     lines = [
         ("=== POWER BAR DEBUG ===", YELLOW),
-        (f"avg(V_diff - S_diff): {avg_vs:+.1f}  (threshold: 40)", result_color),
+        (f"Median VS diff: {median_vs:.1f}  (threshold: 35)", GREEN if median_vs > 35 else RED),
+        (f"Consistency:     {consistency:.0%} ({chunks_above}/{NUM_CHUNKS} > 20)", GREEN if consistency > 0.6 else RED),
         (f"Result: {result}", result_color),
-        ("--- per-chunk V-S diff ---", WHITE),
-        (f"  {' '.join(f'{d['vs_diff']:+.0f}' for d in chunk_data)}", WHITE),
+        ("--- per-chunk VS diff ---", WHITE),
+        (f"  {' '.join(f'{v:+.0f}' for v in vs_vals[:12])}", WHITE),
+        (f"  {' '.join(f'{v:+.0f}' for v in vs_vals[12:])}", WHITE),
     ]
     draw_panel(img, panel_x, panel_y, 370, lines)
 
@@ -223,8 +222,6 @@ def main():
     ocr_cooldown = 0  # only run OCR every N frames
 
     # Cached detection results (updated on their own schedules)
-    pin_pos = None
-    ball_pos = None
     progress = None
     player_state = "none"
     loading = False
@@ -232,11 +229,14 @@ def main():
     dbg_mouse_score = 0.0
     dbg_f_key_score = 0.0
     dbg_near_score = 0.0
+    ball_pos = None
+    ball_x_frac = None
+    ball_y_frac = None
 
     # How often to run each detection (every N frames)
-    ICON_INTERVAL = 5      # template matching is the bottleneck
     PROGRESS_INTERVAL = 3
     CHEAP_INTERVAL = 2     # stance, loading, text checks
+    BALL_INTERVAL = 5      # ball icon (template matching)
 
     print("Debug overlay running. Press 'q' in the overlay window to quit.")
     print("Options: --ocr (distance OCR), --zones (exclusion zones), --power (power bar debug)")
@@ -262,10 +262,6 @@ def main():
         # --- Run detections (throttled) ---
         h, w = frame.shape[:2]
 
-        # Icon detection (expensive — template matching at 8 scales)
-        if frame_count % ICON_INTERVAL == 0:
-            pin_pos, ball_pos = find_icons(frame)
-
         # Progress bar
         if frame_count % PROGRESS_INTERVAL == 0:
             progress = get_player_progress(frame)
@@ -276,7 +272,7 @@ def main():
             loading = is_loading_screen(frame)
             strokes_visible = read_strokes_text(frame)
             # Grab intermediate values for debug display
-            from sbg.detect import (_match_ui_icon, _mouse_icon_tmpl,
+            from sbg.vision.detect import (_match_ui_icon, _mouse_icon_tmpl,
                                     _f_key_icon_tmpl, _near_ball_icon_tmpl)
             frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
             _bl = (0.0, 0.85, 0.15, 1.0)
@@ -285,29 +281,28 @@ def main():
                                              (0.0, 0.82, 0.15, 0.95))
             dbg_near_score = _match_ui_icon(frame_gray, _near_ball_icon_tmpl, _bl)
 
+        # Ball icon detection
+        if frame_count % BALL_INTERVAL == 0:
+            ball_pos = find_ball_icon(frame)
+            if ball_pos is not None:
+                ball_x_frac = ball_pos[0] / w
+                ball_y_frac = ball_pos[1] / h
+            else:
+                ball_x_frac = None
+                ball_y_frac = None
+
         # OCR distances (throttled - every 30 frames if enabled)
         if use_ocr:
             ocr_cooldown -= 1
             if ocr_cooldown <= 0:
-                from sbg.detect import detect_distances
+                from sbg.vision.detect import detect_distances
                 ocr_result = detect_distances(frame)
                 ocr_cooldown = 30
 
-        # Ball edge warning
-        ball_edge_warning = None
-        if ball_pos:
-            bx, by = ball_pos
-            if by < h * 0.15:
-                ball_edge_warning = "BALL NEAR TOP EDGE - walked away!"
-            elif by > h * 0.85:
-                ball_edge_warning = "BALL NEAR BOTTOM EDGE - walked away!"
-
-        # Progress delta (simulated reward)
+        # Progress delta
         progress_delta = None
-        shot_reward_est = None
         if progress is not None and prev_progress is not None:
             progress_delta = progress - prev_progress
-            shot_reward_est = compute_shot_reward(prev_progress, progress)
 
         # --- Draw overlay ---
         display = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -319,12 +314,11 @@ def main():
         if show_power_debug:
             draw_power_bar_debug(display, frame)
 
-        # Draw icon detections
-        if pin_pos:
-            draw_icon_marker(display, pin_pos, "PIN", ORANGE)
-        if ball_pos:
-            color = RED if ball_edge_warning else GREEN
-            draw_icon_marker(display, ball_pos, "BALL", color)
+        # Ball icon marker
+        if ball_pos is not None:
+            bx, by = ball_pos
+            cv2.drawMarker(display, (bx, by), GREEN, cv2.MARKER_CROSS, 30, 2)
+            cv2.circle(display, (bx, by), 20, GREEN, 1)
 
         # --- Info panels ---
         panel_x = 10
@@ -333,14 +327,16 @@ def main():
         # Reward panel
         reward_lines = [
             ("=== REWARDS ===", YELLOW),
-            (f"Step penalty:     {STEP_PENALTY:+.3f}", WHITE),
-            (f"Failed shot:      {FAILED_SHOT_PENALTY:+.3f}", WHITE),
-            (f"Successful shot:  {SUCCESSFUL_SHOT_BONUS:+.3f}", WHITE),
+            (f"Step penalty:     {STEP_PENALTY:+.4f}", WHITE),
+            (f"Ball nav OK:      {BALL_NAV_REWARD:+.2f}", GREEN),
+            (f"Ball nav bad:     {BALL_NAV_PENALTY:+.2f}", RED),
+            (f"Shot bonus:       {SHOT_BONUS:+.1f}", GREEN),
+            (f"Bad shot:         {BAD_SHOT_PENALTY:+.1f}", RED),
             (f"Progress scale:   {PROGRESS_SCALE:.1f}x", WHITE),
-            (f"Hole bonus:       {HOLE_BONUS:+.1f}", WHITE),
+            (f"OOB penalty:      {OOB_PENALTY:+.1f}", RED),
+            (f"Hole complete:    {HOLE_COMPLETE_BONUS:+.1f}", WHITE),
+            (f"Per stroke:       {STROKE_PENALTY:+.1f}", WHITE),
         ]
-        if shot_reward_est is not None:
-            reward_lines.append((f"Est. shot reward: {shot_reward_est:+.3f}", CYAN))
         panel_h = len(reward_lines) * 18 + 10
         panel_y -= panel_h
         draw_panel(display, panel_x, panel_y, 260, reward_lines)
@@ -368,13 +364,7 @@ def main():
         # Detection panel (right side, below state)
         det_lines = [
             ("=== DETECTIONS ===", YELLOW),
-            (f"Pin icon:  {f'({pin_pos[0]}, {pin_pos[1]})' if pin_pos else 'not found'}",
-             GREEN if pin_pos else RED),
-            (f"Ball icon: {f'({ball_pos[0]}, {ball_pos[1]})' if ball_pos else 'not found'}",
-             GREEN if ball_pos else RED),
         ]
-        if ball_edge_warning:
-            det_lines.append((ball_edge_warning, RED))
 
         progress_str = f"{progress:.3f}" if progress is not None else "N/A"
         prev_str = f"{prev_progress:.3f}" if prev_progress is not None else "N/A"
@@ -383,6 +373,25 @@ def main():
         if progress_delta is not None:
             delta_color = GREEN if progress_delta > 0 else RED if progress_delta < 0 else WHITE
             det_lines.append((f"Prog delta: {progress_delta:+.4f}", delta_color))
+
+        # Ball icon info — show position and what the correct nav action would be
+        if ball_pos is not None and ball_x_frac is not None:
+            # Build "correct action" hint
+            hints = []
+            if ball_y_frac < 0.45:
+                hints.append("W")
+            elif ball_y_frac > 0.55:
+                hints.append("S")
+            if ball_x_frac < 0.35:
+                hints.append("turn<")
+            elif ball_x_frac > 0.65:
+                hints.append("turn>")
+            hint_str = "+".join(hints) if hints else "centered"
+            color = GREEN if ball_y_frac < 0.45 and 0.35 < ball_x_frac < 0.65 else ORANGE
+            det_lines.append((f"Ball: ({ball_pos[0]},{ball_pos[1]}) x={ball_x_frac:.2f} y={ball_y_frac:.2f}", WHITE))
+            det_lines.append((f"  Correct action: {hint_str}", color))
+        else:
+            det_lines.append(("Ball icon: not found", RED))
 
         if use_ocr:
             ball_d = ocr_result.get("ball")

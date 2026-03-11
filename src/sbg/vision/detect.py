@@ -11,6 +11,14 @@ import re
 import cv2
 import numpy as np
 
+# --- Progress bar crop region (fractional coordinates) ---
+PROGRESS_BAR_LEFT = 0.02
+PROGRESS_BAR_TOP = 0.093
+PROGRESS_BAR_RIGHT = 0.3
+PROGRESS_BAR_BOTTOM = 0.11
+PROGRESS_FLAG_FRAC = 0.84       # flag x-position as fraction of bar width
+PROGRESS_POLE_FRAC = 0.86       # flag pole x-position (excluded from player search)
+
 # EasyOCR reader — initialized lazily on first use to avoid slow import
 _easyocr_reader = None
 
@@ -89,10 +97,10 @@ def detect_player_state(frame: np.ndarray) -> str:
     # A solid bar brightens (V up) and desaturates (S down), so
     # avg(v_diff - s_diff) is high for can_hit, low for no_hit.
     h, w = frame.shape[:2]
-    ax1, ax2 = int(0.244 * w), int(0.258 * w)
-    bx1, bx2 = int(0.258 * w), int(0.272 * w)
+    ax1, ax2 = int(0.254 * w), int(0.262 * w)
+    bx1, bx2 = int(0.260 * w), int(0.268 * w)
     y_top, y_bot = int(0.48 * h), int(0.84 * h)
-    NUM_CHUNKS = 12
+    NUM_CHUNKS = 24
     chunk_h = (y_bot - y_top) // NUM_CHUNKS
 
     strip_rgb = frame[y_top:y_bot, ax1:bx2]
@@ -107,11 +115,13 @@ def detect_player_state(frame: np.ndarray) -> str:
         cb = strip_hsv[ly:ly + chunk_h, b_off:b_off + (bx2 - bx1)]
         ma = np.mean(ca, axis=(0, 1))
         mb = np.mean(cb, axis=(0, 1))
-        vs_diffs.append((mb[2] - ma[2]) - (mb[1] - ma[1]))
+        vs_diffs.append(abs(mb[2] - ma[2]) + abs(mb[1] - ma[1]))
 
-    avg_vs = float(np.mean(vs_diffs))
+    median_vs = float(np.median(vs_diffs))
+    chunks_above = sum(1 for v in vs_diffs if v > 20)
+    consistency = chunks_above / NUM_CHUNKS
 
-    if avg_vs > 40:
+    if median_vs > 35 and consistency > 0.6:
         return "stance_can_hit"
 
     return "stance_no_hit"
@@ -136,63 +146,107 @@ def is_loading_screen(frame: np.ndarray) -> bool:
     return std < 15 and color_dist < 20
 
 
+def detect_scoreboard(frame: np.ndarray) -> bool:
+    """Detect the between-holes scoreboard screen.
+
+    The scoreboard has a large cream/white panel covering the center of the
+    screen with a dark teal banner at the top ("Next hole in X"). We detect
+    it by checking for a high density of near-white pixels (V>220, S<40 in
+    HSV) in the central region of the frame.
+    """
+    h, w = frame.shape[:2]
+    # Sample the central panel area (roughly where the cream panel sits)
+    center = frame[int(h * 0.08):int(h * 0.92), int(w * 0.18):int(w * 0.95)]
+    hsv = cv2.cvtColor(center, cv2.COLOR_RGB2HSV)
+    # Cream/white pixels: high value, low saturation
+    light_mask = (hsv[:, :, 2] > 220) & (hsv[:, :, 1] < 40)
+    light_ratio = float(np.sum(light_mask)) / (center.shape[0] * center.shape[1])
+    return light_ratio > 0.45
+
+
 def get_player_progress(frame: np.ndarray) -> float | None:
     """Estimate player progress toward the hole from the top progress bar.
 
-    The bar shows a terrain profile with:
-    - A dark circle with white "?" = player position
-    - An orange flag = hole position
+    The bar shows a green terrain strip with the player marked by a small
+    white triangle/stem that creates a saturation dip in the green bar.
+    The flag is at a fixed position on the right.
 
-    We find the player circle by looking for a cluster of very dark pixels
-    with white pixels inside (the "?"), and the flag by orange color.
+    We detect the player by finding the topmost green row (S>120) and
+    looking for columns with notably lower saturation — the marker breaks
+    the green with a white/light pixel.
 
     Returns a value 0.0-1.0 (0=tee, 1=hole), or None if undetectable.
     """
-    # Progress bar region (top of screen)
-    bar = _crop_frac(frame, 0.02, 0.02, 0.33, 0.08)
+    bar = _crop_frac(frame, PROGRESS_BAR_LEFT, PROGRESS_BAR_TOP,
+                     PROGRESS_BAR_RIGHT, PROGRESS_BAR_BOTTOM)
     h, w = bar.shape[:2]
-    gray = cv2.cvtColor(bar, cv2.COLOR_RGB2GRAY)
+    if h < 5 or w < 50:
+        return None
     hsv = cv2.cvtColor(bar, cv2.COLOR_RGB2HSV)
 
-    # --- Find player marker (dark circle with white "?" inside) ---
-    # The circle is very dark (gray < 40) and contains white pixels (gray > 200)
-    dark_mask = gray < 40
-    white_mask = gray > 200
-
-    # Look for columns that have BOTH dark and white pixels vertically
-    # (the dark circle surrounds the white "?")
-    player_x = None
-    best_score = 0
-    # Scan in windows across the bar
-    win = 30  # window width roughly matching circle diameter
-    for x in range(0, w - win):
-        dark_count = np.sum(dark_mask[:, x:x + win])
-        white_count = np.sum(white_mask[:, x:x + win])
-        # The circle has lots of dark pixels and some white inside
-        if dark_count > 80 and white_count > 10:
-            score = dark_count + white_count * 3
-            if score > best_score:
-                best_score = score
-                player_x = x + win // 2
-
-    if player_x is None:
+    # Find the green bar rows (high saturation, excluding edge columns)
+    row_mean_s = np.mean(hsv[:, 10:-20, 1], axis=1)
+    green_rows = np.where(row_mean_s > 120)[0]
+    if len(green_rows) == 0:
         return None
 
-    # --- Find orange flag (hole) ---
-    orange_mask = ((hsv[:, :, 0] < 15) | (hsv[:, :, 0] > 165)) & \
-                  (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 150)
-    flag_cols = np.where(orange_mask.any(axis=0))[0]
-
-    if len(flag_cols) == 0:
+    # The topmost green row is where the marker is most visible
+    top_green = green_rows[0]
+    flag_x = int(w * PROGRESS_FLAG_FRAC)
+    search_start = 10          # skip left edge/rounded corner
+    search_end = flag_x - 5    # stop before flag
+    if search_end <= search_start:
         return None
 
-    flag_x = int(np.mean(flag_cols))
+    # Find columns where saturation is notably lower than the green median
+    row_s = hsv[top_green, search_start:search_end, 1].astype(float)
+    median_s = float(np.median(row_s))
+    if median_s < 50:
+        return None  # not a green bar (loading screen, etc.)
+    threshold = median_s * 0.65
 
-    if flag_x <= player_x:
+    low_cols = np.where(row_s < threshold)[0] + search_start
+    if len(low_cols) == 0:
         return None
+
+    # Cluster contiguous columns, keep narrow ones (marker is 1-3px)
+    clusters: list[np.ndarray] = []
+    run_start = 0
+    for i in range(1, len(low_cols)):
+        if low_cols[i] - low_cols[i - 1] > 3:
+            clusters.append(low_cols[run_start:i])
+            run_start = i
+    clusters.append(low_cols[run_start:])
+
+    narrow = [c for c in clusters if len(c) <= 5]
+    if not narrow:
+        return None
+
+    # Rightmost narrow cluster = furthest progress toward flag
+    cluster = narrow[-1]
+    player_x = int(np.mean(cluster))
 
     progress = player_x / flag_x
     return float(np.clip(progress, 0.0, 1.0))
+
+
+def is_out_of_bounds(frame: np.ndarray) -> bool:
+    """Detect the 'Out of bounds / Eliminated in X' red banner.
+
+    The banner is a dark red/maroon rectangle in the upper-center of the
+    screen. We detect it by looking for a high density of red pixels
+    in a tight region where the banner appears.
+    """
+    h, w = frame.shape[:2]
+    # Banner region: center horizontal, upper-third vertical
+    region = frame[int(h * 0.28):int(h * 0.38), int(w * 0.35):int(w * 0.65)]
+    hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
+    # Dark red/maroon banner: H near 0 or >170 (red wraps), S>150, V 120-200
+    red_mask = (((hsv[:, :, 0] < 15) | (hsv[:, :, 0] > 170)) &
+                (hsv[:, :, 1] > 150) &
+                (hsv[:, :, 2] > 120) & (hsv[:, :, 2] < 200))
+    red_ratio = float(np.sum(red_mask)) / (region.shape[0] * region.shape[1])
+    return red_ratio > 0.05
 
 
 def read_strokes_text(frame: np.ndarray) -> bool:
@@ -220,16 +274,17 @@ def _load_template(name: str) -> np.ndarray:
 
 # Templates loaded once at module level
 _pin_template = _load_template("pin.png")
-_ball_template = _load_template("balls.png")
+_ball_templates = [_load_template("ball_v2.png"), _load_template("ball_v3.png"),
+                   _load_template("ball_v4.png")]
 
 _PIN_SCALES = (0.6, 1.0)
-_BALL_SCALES = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 _MATCH_THRESHOLD = 0.96
+_BALL_MATCH_THRESHOLD = 0.92
 
 
 def _match_template(frame_bgr: np.ndarray, template_bgra: np.ndarray,
                     threshold: float = _MATCH_THRESHOLD,
-                    scales: tuple[float, ...] = _BALL_SCALES,
+                    scales: tuple[float, ...] = (1.0,),
                     ) -> list[tuple[int, int, float, float]]:
     """Match a BGRA template at multiple scales using TM_CCORR_NORMED.
 
@@ -281,15 +336,22 @@ def _match_template(frame_bgr: np.ndarray, template_bgra: np.ndarray,
     return filtered
 
 
-def _in_exclusion_zone(cx: int, cy: int, h: int, w: int) -> bool:
+def _in_exclusion_zone(cx: int, cy: int, h: int, w: int,
+                       icon: str = "pin") -> bool:
     """Check if a point is in a UI exclusion zone.
 
-    Kept minimal — color validation (orange/green/white counts) handles
-    most false positive filtering. Only exclude the progress bar area
-    where the flag icon reliably triggers false pin matches.
+    Pin exclusion: progress bar area (top 12% & left 40%).
+    Ball exclusion: top 12% full-width (distance markers), bottom 12%
+    (distance markers + prompts).
     """
-    if cx < w * 0.40 and cy < h * 0.12:
-        return True  # progress bar flag looks like pin icon
+    if icon == "pin":
+        if cx < w * 0.40 and cy < h * 0.12:
+            return True  # progress bar flag looks like pin icon
+    elif icon == "ball":
+        if cy < h * 0.12:
+            return True  # distance marker icons across top
+        if cy > h * 0.88:
+            return True  # distance marker icons at bottom
     return False
 
 
@@ -345,7 +407,7 @@ def find_icons(frame: np.ndarray) -> tuple[tuple[int, int] | None, tuple[int, in
     # Pin icon
     pin_pos = None
     for cx, cy, score, scale in _match_template(frame_bgr, _pin_template, scales=_PIN_SCALES):
-        if _in_exclusion_zone(cx, cy, h, w):
+        if _in_exclusion_zone(cx, cy, h, w, icon="pin"):
             continue
         orange = _count_orange(hsv, cx, cy, h, w)
         if orange < 3 or orange > 100:
@@ -356,19 +418,26 @@ def find_icons(frame: np.ndarray) -> tuple[tuple[int, int] | None, tuple[int, in
         pin_pos = (cx, cy)
         break
 
-    # Ball icon
+    # Ball icon — pre-scaled templates, matched at 1.0 only, stop on first hit
     ball_pos = None
-    for cx, cy, score, scale in _match_template(frame_bgr, _ball_template, scales=_BALL_SCALES):
-        if _in_exclusion_zone(cx, cy, h, w):
-            continue
-        orange = _count_orange(hsv, cx, cy, h, w)
-        if orange >= 5:
-            continue
-        white = _count_white_center(hsv, cx, cy, h, w)
-        if white < 50:
-            continue
-        ball_pos = (cx, cy)
-        break
+    for tmpl in _ball_templates:
+        for cx, cy, score, scale in _match_template(
+                frame_bgr, tmpl, threshold=_BALL_MATCH_THRESHOLD, scales=(1.0,)):
+            if _in_exclusion_zone(cx, cy, h, w, icon="ball"):
+                continue
+            orange = _count_orange(hsv, cx, cy, h, w)
+            if orange >= 5:
+                continue
+            green = _count_green_ring(hsv, cx, cy, h, w)
+            if green < 8:
+                continue
+            white = _count_white_center(hsv, cx, cy, h, w)
+            if white > 200:
+                continue  # distance markers have 250-310 white pixels
+            ball_pos = (cx, cy)
+            break
+        if ball_pos is not None:
+            break
 
     return pin_pos, ball_pos
 

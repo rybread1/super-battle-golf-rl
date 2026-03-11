@@ -1,10 +1,12 @@
-"""Menu navigation and game state detection."""
+"""Menu navigation and game state transitions."""
 
 import time
 
 import cv2
 import numpy as np
 import pydirectinput
+
+from sbg.vision.detect import is_loading_screen, detect_scoreboard
 
 pydirectinput.PAUSE = 0.02
 
@@ -18,22 +20,6 @@ def click_at(hwnd: int, region: tuple[int, int, int, int], x: int, y: int):
     screen_x = region[0] + x
     screen_y = region[1] + y
     pydirectinput.click(screen_x, screen_y)
-
-
-# --- State detection ---
-
-def is_loading_screen(frame: np.ndarray) -> bool:
-    """Check if a frame is the loading screen.
-
-    The loading screen is a uniform dark purplish-grey with:
-    - Mean RGB close to (50, 46, 50)
-    - Very low standard deviation (< 15)
-    """
-    mean_rgb = np.mean(frame, axis=(0, 1))
-    std = np.std(frame.astype(float))
-    target = np.array([50, 46, 50])
-    color_dist = np.linalg.norm(mean_rgb - target)
-    return std < 15 and color_dist < 20
 
 
 def _count_hud_white_pixels(frame: np.ndarray) -> int:
@@ -183,12 +169,53 @@ def navigate_to_match(hwnd: int, region: tuple[int, int, int, int], capture):
     print("Navigation complete — ready to play.")
 
 
+def wait_for_scoreboard(capture, timeout: float = 30.0) -> bool:
+    """Wait for the between-holes scoreboard to appear and then dismiss.
+
+    The scoreboard shows "Next hole in X" with a countdown. We detect it
+    by checking for the large cream/white panel, then wait for it to go away.
+
+    Returns True if scoreboard was detected and dismissed, False on timeout.
+    """
+    start = time.time()
+    scoreboard_detected = False
+
+    while time.time() - start < timeout:
+        frame = capture.grab()
+        if frame is None:
+            time.sleep(0.1)
+            continue
+
+        is_scoreboard = detect_scoreboard(frame)
+
+        if not scoreboard_detected and is_scoreboard:
+            scoreboard_detected = True
+            print("  Scoreboard detected...")
+        elif scoreboard_detected and not is_scoreboard:
+            print("  Scoreboard dismissed.")
+            return True
+
+        time.sleep(0.25)
+
+    if not scoreboard_detected:
+        print("  No scoreboard detected, continuing anyway...")
+        return True
+
+    print("  Warning: scoreboard timed out")
+    return False
+
+
 def wait_for_next_hole(capture):
     """Wait for the next hole to be ready (between holes during a match).
 
-    Handles the loading screen + countdown that occurs between holes.
+    Full transition sequence:
+    1. Scoreboard ("Next hole in X") — ~5s countdown
+    2. Loading screen — dark grey with spinner
+    3. Course overview / hole name — aerial pan, no player
+    4. Countdown (5-4-3-2-1-Golf!) — player spawns, HUD appears
     """
     print("Waiting for next hole...")
+    wait_for_scoreboard(capture)
     wait_for_loading(capture)
     wait_for_hole_ready(capture, early_start=1.0)
     print("Next hole ready — ready to play.")

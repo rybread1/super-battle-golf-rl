@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "pyyaml",
     "tensorboard",
+    "setuptools<70",
     "pywin32>=311",
     "ipykernel>=7.2.0",
 ]
@@ -26,9 +27,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sbg"]
-
-[project.scripts]
-train = "sbg.train:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }

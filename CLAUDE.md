@@ -15,15 +15,26 @@ The agent alternates between two phases each hole:
 
 ## Project Layout
 - `src/sbg/env.py` — Gymnasium environment
-- `src/sbg/detect.py` — All CV detection (icons, progress bar, stance, loading screen, OCR)
 - `src/sbg/reward.py` — Reward constants and computation
-- `src/sbg/actions.py` — Keyboard input helpers
-- `src/sbg/capture.py` — dxcam screen capture
-- `src/sbg/window.py` — Game window management
-- `src/sbg/navigate.py` — Menu navigation, hole transitions
-- `src/sbg/train.py` — Training entrypoint
-- `src/sbg/templates/` — BGRA template images for icon matching (pin.png, balls.png)
-- `scripts/` — Ad-hoc test and debug scripts
+- `src/sbg/game/` — Game interaction layer
+  - `actions.py` — Keyboard input helpers
+  - `capture.py` — dxcam screen capture
+  - `window.py` — Game window management
+  - `navigate.py` — Menu navigation, hole transitions
+- `src/sbg/vision/` — Computer vision detection
+  - `detect.py` — CV detection (icons, progress bar, stance, loading screen, OCR)
+  - `templates/` — BGRA template images for icon matching
+- `src/sbg/models/` — Learned models
+  - `icon_net.py` — CNN for ball/pin icon detection (320x180 input, ~456K params)
+  - `dataset.py` — Dataset loader for annotated frames (JSON format)
+  - `loss.py` — Loss function (BCE + smooth L1)
+- `scripts/` — Scripts organized by purpose
+  - `training/train.py` — RL training entrypoint (SB3 PPO)
+  - `training/train_icons.py` — Training script for icon detection CNN
+  - `tools/debug_overlay.py` — Live debug visualization
+  - `tools/record_gameplay.py` — Record gameplay screenshots
+  - `tools/screenshot.py` — Single screenshot capture
+  - `tools/start_game.py` — Launch game and navigate to match
 - `screenshots/` — Recorded gameplay frames for offline testing
 
 ## Gotchas and Known Issues
